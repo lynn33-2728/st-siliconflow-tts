@@ -293,6 +293,11 @@ function getAllVoiceOptions() {
   return options;
 }
 
+function isTemplateSpeakerName(name) {
+  const text = String(name || "").trim();
+  return /^\$\{[^}]+\}$/.test(text);
+}
+
 function collectCurrentChatSpeakers() {
   const context = getContext();
   const chat = Array.isArray(context?.chat) ? context.chat : [];
@@ -300,11 +305,11 @@ function collectCurrentChatSpeakers() {
   chat.forEach(message => {
     if (!message || message.is_user) return;
     const name = String(message.name || message.extra?.display_name || "").trim();
-    if (name && !names.includes(name)) names.push(name);
+    if (name && !isTemplateSpeakerName(name) && !names.includes(name)) names.push(name);
   });
   $(".mes").each(function () {
     const name = $(this).find(".name_text").first().text().trim();
-    if (name && !names.includes(name)) names.push(name);
+    if (name && !isTemplateSpeakerName(name) && !names.includes(name)) names.push(name);
   });
   return names;
 }
@@ -339,7 +344,7 @@ function getMessageSpeakerName(messageElement) {
 
 function getVoiceForSpeaker(speakerName) {
   const fallback = $("#tts_voice").val() || extension_settings[extensionName].ttsVoice || defaultSettings.ttsVoice;
-  if (!speakerName) return fallback;
+  if (!speakerName || isTemplateSpeakerName(speakerName)) return fallback;
   const mapped = extension_settings[extensionName].roleVoiceMap?.[speakerName];
   return mapped || fallback;
 }
