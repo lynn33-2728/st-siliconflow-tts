@@ -338,3 +338,33 @@
 .siliconflow-extension-settings .tts-role-voice-select {
     width: 100%;
 }
+
+.siliconflow-extension-settings .sf-file-import-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.siliconflow-extension-settings .sf-file-import-row input[type="file"] {
+    position: absolute;
+    width: 1px !important;
+    height: 1px !important;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.siliconflow-extension-settings .sf-file-import-button {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    margin: 0 !important;
+    cursor: pointer;
+}
+
+.siliconflow-extension-settings .sf-file-name {
+    color: var(--SmartThemeEmColor, rgba(255, 255, 255, 0.72));
+    font-size: 0.9em;
+    min-width: 100px;
+}

@@ -102,7 +102,7 @@
 
                             <div class="sf-extra-text-rules-body" style="display:none;">
                                 <small>
-                                    处理顺序：小白最好【不想读】和【只读范围】二选一,后面(）里的注解不用理会(先删掉 <code>X不想读</code>，再读取 <code>✓只读范围</code>；勾选<code>包括没有标签的内容</code>时，会额外读取标签外正文。最后再按下面开始/结束标记提取。)
+                                    处理顺序：先删掉 <code>X不想读</code>，再读取 <code>✓只读范围</code>；勾选<code>包括没有标签的内容</code>时，会额外读取标签外正文。最后再按下面开始/结束标记提取。
                                 </small>
 
                                 <div class="sf-tag-rule-block sf-tag-rule-skip">
@@ -174,8 +174,12 @@
                             </div>
 
                             <div class="setting-item">
-                                <label for="clone_voice_audio">参考音频</label>
-                                <input type="file" id="clone_voice_audio" accept="audio/*" />
+                                <label>参考音频</label>
+                                <div class="sf-file-import-row">
+                                    <label for="clone_voice_audio" class="menu_button sf-file-import-button">导入参考音频</label>
+                                    <input type="file" id="clone_voice_audio" accept="audio/*" />
+                                    <span id="clone_voice_audio_name" class="sf-file-name">未选择音频</span>
+                                </div>
                                 <small>支持 mp3、wav 等音频格式，建议 5-10 秒清晰语音</small>
                             </div>
 
@@ -342,5 +346,31 @@
 }
 .siliconflow-extension-settings .tts-role-voice-select {
     width: 100%;
+}
+.siliconflow-extension-settings .sf-file-import-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.siliconflow-extension-settings .sf-file-import-row input[type="file"] {
+    position: absolute;
+    width: 1px !important;
+    height: 1px !important;
+    opacity: 0;
+    pointer-events: none;
+}
+.siliconflow-extension-settings .sf-file-import-button {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    min-height: 30px;
+    margin: 0 !important;
+    cursor: pointer;
+}
+.siliconflow-extension-settings .sf-file-name {
+    color: var(--SmartThemeEmColor, rgba(255, 255, 255, 0.72));
+    font-size: 0.9em;
+    min-width: 100px;
 }
 </style>

@@ -2035,6 +2035,7 @@ async function uploadVoice() {
         $("#clone_voice_name").val("");
         $("#clone_voice_text").val("");
         $("#clone_voice_audio").val("");
+        $("#clone_voice_audio_name").text("未选择音频");
         
         toastr.success(`音色 "${voiceName}" 克隆成功！`, "克隆音色");
         
@@ -2195,6 +2196,10 @@ jQuery(async () => {
   // 克隆音色功能事件
   $("#upload_voice").on("click", uploadVoice);
   $("#refresh_custom_voices").on("click", loadCustomVoices);
+  $("#clone_voice_audio").on("change", function() {
+    const file = this.files && this.files[0];
+    $("#clone_voice_audio_name").text(file ? file.name : "未选择音频");
+  });
   
   // 删除音色事件（使用事件委托）
   $(document).on("click", ".delete-voice", function() {
