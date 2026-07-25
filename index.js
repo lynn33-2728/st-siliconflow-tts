@@ -77,8 +77,12 @@ const defaultSettings = {
   sampleRate: 32000,
   imageModel: "",
   imageSize: "512",
-  textStart: "（",
-  textEnd: "）",
+  textStart: "\"",
+  textEnd: "\"",
+  symbolReadInside: true,
+  symbolReadOutside: true,
+  symbolOutsideStart: "（ 【",
+  symbolOutsideEnd: "） 】",
   extraTextRulesEnabled: false,
   skipTagPairs: [],
   readTagPairs: [],
@@ -201,6 +205,19 @@ async function loadSettings() {
       extension_settings[extensionName][key] = defaultSettings[key];
     }
   });
+  if (extension_settings[extensionName].textStart === "（") {
+    extension_settings[extensionName].textStart = defaultSettings.textStart;
+  }
+  if (extension_settings[extensionName].textEnd === "）") {
+    extension_settings[extensionName].textEnd = defaultSettings.textEnd;
+  }
+  if (extension_settings[extensionName].textStart === "（ 【 \"" && extension_settings[extensionName].textEnd === "） 】 \"") {
+    extension_settings[extensionName].textStart = defaultSettings.textStart;
+    extension_settings[extensionName].textEnd = defaultSettings.textEnd;
+    extension_settings[extensionName].symbolReadOutside = true;
+    extension_settings[extensionName].symbolOutsideStart = defaultSettings.symbolOutsideStart;
+    extension_settings[extensionName].symbolOutsideEnd = defaultSettings.symbolOutsideEnd;
+  }
 
   // 更新UI
   $("#siliconflow_api_key").val(extension_settings[extensionName].apiKey || "");
@@ -216,6 +233,10 @@ async function loadSettings() {
   $("#image_size").val(extension_settings[extensionName].imageSize || defaultSettings.imageSize);
   $("#image_text_start").val(extension_settings[extensionName].textStart || defaultSettings.textStart);
   $("#image_text_end").val(extension_settings[extensionName].textEnd || defaultSettings.textEnd);
+  $("#tts_read_symbol_inside").prop("checked", extension_settings[extensionName].symbolReadInside !== false);
+  $("#tts_read_symbol_outside").prop("checked", extension_settings[extensionName].symbolReadOutside === true);
+  $("#tts_symbol_outside_start").val(extension_settings[extensionName].symbolOutsideStart || defaultSettings.symbolOutsideStart);
+  $("#tts_symbol_outside_end").val(extension_settings[extensionName].symbolOutsideEnd || defaultSettings.symbolOutsideEnd);
   $("#generation_frequency").val(extension_settings[extensionName].generationFrequency || defaultSettings.generationFrequency);
   $("#auto_play_audio").prop("checked", extension_settings[extensionName].autoPlay !== false);
   $("#auto_play_user").prop("checked", extension_settings[extensionName].autoPlayUser === true);
@@ -224,6 +245,7 @@ async function loadSettings() {
   renderTagPairSettings("skip");
   renderTagPairSettings("read");
   updateExtraTextRulesUI();
+  updateSymbolConflictUI();
   
   updateVoiceOptions();
 }
@@ -362,6 +384,10 @@ function saveSettings() {
   extension_settings[extensionName].imageSize = $("#image_size").val();
   extension_settings[extensionName].textStart = $("#image_text_start").val();
   extension_settings[extensionName].textEnd = $("#image_text_end").val();
+  extension_settings[extensionName].symbolReadInside = $("#tts_read_symbol_inside").prop("checked") === true;
+  extension_settings[extensionName].symbolReadOutside = $("#tts_read_symbol_outside").prop("checked") === true;
+  extension_settings[extensionName].symbolOutsideStart = $("#tts_symbol_outside_start").val();
+  extension_settings[extensionName].symbolOutsideEnd = $("#tts_symbol_outside_end").val();
   extension_settings[extensionName].extraTextRulesEnabled = $("#tts_enable_extra_text_rules").prop("checked") === true;
   extension_settings[extensionName].skipTagPairs = collectTagPairSettings("skip");
   extension_settings[extensionName].readTagPairs = collectTagPairSettings("read");
@@ -917,7 +943,7 @@ function getTtsAudioEl() {
 
     const versionTag = document.createElement("span");
     versionTag.id = "tts-player-version";
-    versionTag.textContent = "v3L";
+    versionTag.textContent = "v1.6.1";
     versionTag.title = "悬浮进度条版本";
     versionTag.style.cssText = "color:rgba(255,255,255,0.45);font-size:10px;line-height:1;flex:0 0 auto;";
 
@@ -1413,7 +1439,7 @@ function bindPlayButtonDelegation() {
   });
 }
 
-// 按设置里的开始/结束标记提取文本；提取不到返回空串
+// 按设置里的开始/结束符号提取文本；提取不到返回空串
 // 把各种弯引号、全角引号统一成直引号，这样无论标记设直/弯都能匹配
 function normalizeQuotes(s) {
   if (!s) return s;
@@ -1526,10 +1552,10 @@ function prepareTextForTts(message) {
     let readBlocks = [];
     if (readPairs.length > 0) {
       readBlocks = findTagBlocks(working, readPairs);
-      readBlocks.forEach(block => {
+      for (const block of readBlocks) {
         const marked = extractMarkedText(block.text);
         if (marked) parts.push(marked);
-      });
+      }
     }
 
     if (includeUntagged && readPairs.length > 0) {
@@ -1558,25 +1584,50 @@ function prepareTextForTts(message) {
   return normalizeTtsWhitespace(markedText || fullText);
 }
 
-function extractMarkedText(message) {
-  const startRaw = $("#image_text_start").val();
-  const endRaw = $("#image_text_end").val();
-  if (!startRaw || !endRaw) return "";
-
-  // 引号通用化：消息和标记都规整一遍，直/弯引号互通
-  message = normalizeQuotes(message);
-
-  // 用空格拆成多组标记，按顺序配对：开始[i] 配 结束[i]
+function parseSymbolPairs(startRaw, endRaw) {
   const starts = normalizeQuotes(startRaw).split(/\s+/).filter(Boolean);
   const ends = normalizeQuotes(endRaw).split(/\s+/).filter(Boolean);
   const pairCount = Math.min(starts.length, ends.length);
-  if (pairCount === 0) return "";
+  if (pairCount === 0) return [];
+  return Array.from({ length: pairCount }, (_, index) => ({
+    start: starts[index],
+    end: ends[index],
+    key: `${starts[index]}→${ends[index]}`,
+  }));
+}
+
+function getSymbolConflictKeys(insidePairs, outsidePairs) {
+  const outsideKeys = new Set(outsidePairs.map(pair => pair.key));
+  return new Set(insidePairs.filter(pair => outsideKeys.has(pair.key)).map(pair => pair.key));
+}
+
+function getCurrentSymbolPairs() {
+  const insidePairs = parseSymbolPairs($("#image_text_start").val() || "", $("#image_text_end").val() || "");
+  const outsidePairs = parseSymbolPairs($("#tts_symbol_outside_start").val() || "", $("#tts_symbol_outside_end").val() || "");
+  return { insidePairs, outsidePairs, conflictKeys: getSymbolConflictKeys(insidePairs, outsidePairs) };
+}
+
+function updateSymbolConflictUI() {
+  const readInside = $("#tts_read_symbol_inside").prop("checked") === true;
+  const readOutside = $("#tts_read_symbol_outside").prop("checked") === true;
+  const conflictCount = readInside && readOutside ? getCurrentSymbolPairs().conflictKeys.size : 0;
+  const hasConflict = conflictCount > 0;
+  $("#image_text_start, #image_text_end, #tts_symbol_outside_start, #tts_symbol_outside_end")
+    .toggleClass("sf-symbol-conflict", hasConflict);
+  $("#tts_symbol_conflict_hint").toggle(hasConflict);
+}
+
+function collectSymbolMatches(message, pairs) {
+  if (!pairs.length) return [];
+
+  // 引号通用化：消息和符号都规整一遍，直/弯引号互通
+  message = normalizeQuotes(message);
 
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const found = []; // {pos, text}
+  const found = []; // {pos, end, text}
 
-  for (let p = 0; p < pairCount; p++) {
-    const s = starts[p], e = ends[p];
+  for (const pair of pairs) {
+    const s = pair.start, e = pair.end;
     const quoteLike = (s === '"' || e === '"' || s === "'" || e === "'");
     if (quoteLike || s === e) {
       // 起止相同（如引号）：用配对算法
@@ -1586,7 +1637,11 @@ function extractMarkedText(message) {
         const isMarker = quoteLike ? (ch === s || ch === e) : ch === s;
         if (isMarker) {
           if (!inside) { inside = true; cur = ""; startPos = i; }
-          else { if (cur.trim()) found.push({ pos: startPos, text: cur.trim() }); inside = false; cur = ""; }
+          else {
+            if (cur.trim()) found.push({ pos: startPos, end: i + ch.length, text: cur.trim() });
+            inside = false;
+            cur = "";
+          }
         } else if (inside) { cur += ch; }
       }
     } else {
@@ -1594,15 +1649,59 @@ function extractMarkedText(message) {
       const re = new RegExp(esc(s) + "([\\s\\S]*?)" + esc(e), "g");
       let m;
       while ((m = re.exec(message)) !== null) {
-        if (m[1].trim()) found.push({ pos: m.index, text: m[1].trim() });
+        if (m[1].trim()) found.push({ pos: m.index, end: m.index + m[0].length, text: m[1].trim() });
       }
     }
   }
 
+  return found;
+}
+
+function extractTextInsideSymbols(message, pairs) {
+  const found = collectSymbolMatches(message, pairs);
   if (found.length === 0) return "";
   // 按在消息里出现的先后顺序合并，读起来顺
   found.sort((a, b) => a.pos - b.pos);
   return found.map(f => f.text).join("，");
+}
+
+function extractTextOutsideSymbols(message, pairs) {
+  const normalizedMessage = normalizeQuotes(message);
+  const found = collectSymbolMatches(normalizedMessage, pairs)
+    .filter(item => Number.isFinite(item.pos) && Number.isFinite(item.end));
+  if (found.length === 0) return "";
+  return normalizeTtsWhitespace(removeRanges(normalizedMessage, found));
+}
+
+function extractMarkedText(message) {
+  const readInside = $("#tts_read_symbol_inside").length
+    ? $("#tts_read_symbol_inside").prop("checked") === true
+    : extension_settings[extensionName].symbolReadInside !== false;
+  const readOutside = $("#tts_read_symbol_outside").length
+    ? $("#tts_read_symbol_outside").prop("checked") === true
+    : extension_settings[extensionName].symbolReadOutside === true;
+
+  const { insidePairs, outsidePairs, conflictKeys } = getCurrentSymbolPairs();
+  const usableInsidePairs = readInside ? insidePairs.filter(pair => !conflictKeys.has(pair.key)) : [];
+  const usableOutsidePairs = readOutside ? outsidePairs.filter(pair => !conflictKeys.has(pair.key)) : [];
+  if (readInside && readOutside && conflictKeys.size > 0) {
+    ttsLog("⚠ 符号打架：" + Array.from(conflictKeys).join("、") + "，打架的符号已跳过");
+    console.warn("符号打架：", Array.from(conflictKeys));
+  }
+
+  let working = String(message || "");
+  if (usableOutsidePairs.length > 0) {
+    const outsideText = extractTextOutsideSymbols(working, usableOutsidePairs);
+    if (outsideText) working = outsideText;
+  }
+
+  if (usableInsidePairs.length > 0) {
+    const insideText = extractTextInsideSymbols(working, usableInsidePairs);
+    if (insideText) return insideText;
+    return working !== String(message || "") ? working : "";
+  }
+
+  return working !== String(message || "") ? working : "";
 }
 
 // 监听消息事件，自动提取文本并生成语音
@@ -1689,7 +1788,7 @@ function setupMessageListener() {
 
       const textToRead = prepareTextForTts(message);
       if (!textToRead) {
-        console.log('按当前标签/标记规则没有可朗读内容，跳过自动朗读');
+        console.log('按当前标签/符号规则没有可朗读内容，跳过自动朗读');
         return;
       }
       console.log('自动朗读最终文本:', textToRead.substring(0, 100));
@@ -1716,7 +1815,7 @@ function setupMessageListener() {
           }
         }
         
-        // 判断开始和结束标记是否相同（如英文引号）
+        // 判断开始和结束符号是否相同（如英文引号）
         if (textStart === textEnd) {
           // 相同标记：使用更智能的配对算法
           let insideQuote = false;
@@ -1820,7 +1919,7 @@ function setupMessageListener() {
 
       const textToRead = prepareTextForTts(message);
       if (!textToRead) {
-        console.log('用户消息按当前标签/标记规则没有可朗读内容，跳过自动朗读');
+        console.log('用户消息按当前标签/符号规则没有可朗读内容，跳过自动朗读');
         return;
       }
       console.log('用户消息自动朗读最终文本:', textToRead.substring(0, 100));
@@ -1844,7 +1943,7 @@ function setupMessageListener() {
           }
         }
         
-        // 判断开始和结束标记是否相同（如英文引号）
+        // 判断开始和结束符号是否相同（如英文引号）
         if (textStart === textEnd) {
           // 相同标记：使用更智能的配对算法
           let insideQuote = false;
@@ -2221,10 +2320,19 @@ jQuery(async () => {
     console.log("自动朗读用户消息:", $(this).prop("checked"));
   });
   
-  // 标记设置自动保存
-  $("#image_text_start, #image_text_end").on("input", function() {
+  // 符号设置自动保存
+  $("#image_text_start, #image_text_end, #tts_symbol_outside_start, #tts_symbol_outside_end").on("input", function() {
     extension_settings[extensionName].textStart = $("#image_text_start").val();
     extension_settings[extensionName].textEnd = $("#image_text_end").val();
+    extension_settings[extensionName].symbolOutsideStart = $("#tts_symbol_outside_start").val();
+    extension_settings[extensionName].symbolOutsideEnd = $("#tts_symbol_outside_end").val();
+    updateSymbolConflictUI();
+    saveSettingsDebounced();
+  });
+  $("#tts_read_symbol_inside, #tts_read_symbol_outside").on("change", function() {
+    extension_settings[extensionName].symbolReadInside = $("#tts_read_symbol_inside").prop("checked") === true;
+    extension_settings[extensionName].symbolReadOutside = $("#tts_read_symbol_outside").prop("checked") === true;
+    updateSymbolConflictUI();
     saveSettingsDebounced();
   });
   $("#tts_add_skip_tag").on("click", function() {

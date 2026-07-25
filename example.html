@@ -9,13 +9,13 @@
             <div class="sf-settings">
                 <section class="sf-section sf-progress-note">
                     <small>
-                        • 按住左侧 🔊 拖动进度条位置。<br>
-                        • ▶ 重听用缓存，不重复扣费。
+                        • 版本：硅基语音1.6.1 by lynn琳<br>
+                        • 按住左侧 🔊 拖动进度条位置，▶ 重听用缓存，不重复扣费。
                     </small>
                 </section>
 
                 <section class="sf-section">
-                    <h4>1组 API设定</h4>
+                    <h4>1 API设定</h4>
                     <div class="sf-help-line">从 <a href="https://siliconflow.cn" target="_blank">硅基流动官网</a> 获取API密钥</div>
                     <div class="sf-setting-row">
                         <label for="siliconflow_api_key">API密钥：</label>
@@ -33,7 +33,7 @@
                 </div>
 
                 <section class="sf-section">
-                    <h4>2组 语音设定</h4>
+                    <h4>2 语音设定</h4>
 
                     <div class="setting-item button-group sf-grid two sf-compact-grid">
                         <div class="setting-item">
@@ -102,7 +102,7 @@
 
                             <div class="sf-extra-text-rules-body" style="display:none;">
                                 <small>
-                                    处理顺序：先删掉 <code>X不想读</code>，再读取 <code>✓只读范围</code>；勾选<code>包括没有标签的内容</code>时，会额外读取标签外正文。最后再按下面开始/结束标记提取。
+                                    处理顺序：先删掉 <code>X不想读</code>，再读取 <code>✓只读范围</code>；勾选<code>包括没有标签的内容</code>时，会额外读取标签外正文。最后再按下面符号设置提取。
                                 </small>
 
                                 <div class="sf-tag-rule-block sf-tag-rule-skip">
@@ -131,16 +131,39 @@
                             </div>
                         </div>
 
-                        <div class="setting-item button-group sf-grid two sf-compact-grid">
-                            <div class="setting-item">
-                                <label for="image_text_start">开始标记</label>
-                                <input type="text" id="image_text_start" value="（ 【 &quot;" />
+                        <div class="sf-symbol-rules">
+                            <label class="setting-item button-group sf-checkbox-row">
+                                <input type="checkbox" id="tts_read_symbol_inside" checked />
+                                <strong>读此符里</strong>
+                            </label>
+                            <div class="setting-item button-group sf-grid two sf-compact-grid">
+                                <div class="setting-item">
+                                    <label for="image_text_start">开始符号</label>
+                                    <input type="text" id="image_text_start" value="&quot;" />
+                                </div>
+
+                                <div class="setting-item">
+                                    <label for="image_text_end">结束符号</label>
+                                    <input type="text" id="image_text_end" value="&quot;" />
+                                </div>
                             </div>
 
-                            <div class="setting-item">
-                                <label for="image_text_end">结束标记</label>
-                                <input type="text" id="image_text_end" value="） 】 &quot;" />
+                            <label class="setting-item button-group sf-checkbox-row">
+                                <input type="checkbox" id="tts_read_symbol_outside" checked />
+                                <strong>读此符外</strong>
+                            </label>
+                            <div class="setting-item button-group sf-grid two sf-compact-grid">
+                                <div class="setting-item">
+                                    <label for="tts_symbol_outside_start">开始符号</label>
+                                    <input type="text" id="tts_symbol_outside_start" value="（ 【" />
+                                </div>
+
+                                <div class="setting-item">
+                                    <label for="tts_symbol_outside_end">结束符号</label>
+                                    <input type="text" id="tts_symbol_outside_end" value="） 】" />
+                                </div>
                             </div>
+                            <small id="tts_symbol_conflict_hint" class="sf-symbol-conflict-hint" style="display:none;">符号打架</small>
                         </div>
 
                         <div class="setting-item button-group sf-setting-row sf-limit-row">
@@ -148,8 +171,10 @@
                             <input type="number" id="tts_max_read_chars" min="0" step="1" placeholder="大于设定字数不发送，留空或0=不限制" />
                         </div>
                         <small>
-                            多组标记时用空格隔开，如：开始填 <code>（ 【 "</code>，结束填 <code>） 】 "</code><br>
-                            提取不到标记内容时，会自动改读整条消息，不会卡住。<br>
+                            多组符号时用空格隔开，如：读此符外开始填 <code>（ 【</code>，结束填 <code>） 】</code><br>
+                            默认会排除括号/方括号里的动作，再读取引号里的台词；如 <code>（懒洋洋起来）"夫君，早上好。"</code> 会读 <code>夫君，早上好。</code><br>
+                            同一组符号不能同时“读里”又“读外”，重复时输入框会变红并提示“符号打架”；没打架的符号仍会正常生效。<br>
+                            提取不到符号内容时，会自动改读整条消息，不会卡住。<br>
                             全文发送上限,建议填1500,留空或0=不限制。
                         </small>
 
@@ -174,12 +199,13 @@
                             </div>
 
                             <div class="setting-item">
+                                <label>参考音频</label>
                                 <div class="sf-file-import-row">
                                     <label for="clone_voice_audio" class="menu_button sf-file-import-button">导入参考音频</label>
                                     <input type="file" id="clone_voice_audio" accept="audio/*" />
                                     <span id="clone_voice_audio_name" class="sf-file-name">未选择音频</span>
                                 </div>
-                                <small>支持 mp3、wav 等音频格式，建议 5-15 秒尽量，干净、稳定、清楚。超 30 秒通常收益不大，反而容易混入噪声和变化。</small>
+                                <small>支持 mp3、wav 等音频格式，建议 5-10 秒清晰语音</small>
                             </div>
 
                             <div class="setting-item button-group">
@@ -371,5 +397,14 @@
     color: var(--SmartThemeEmColor, rgba(255, 255, 255, 0.72));
     font-size: 0.9em;
     min-width: 100px;
+}
+.siliconflow-extension-settings .sf-symbol-conflict {
+    border-color: #ff4d4f !important;
+    box-shadow: 0 0 0 1px rgba(255, 77, 79, 0.9), 0 0 8px rgba(255, 77, 79, 0.45) !important;
+}
+.siliconflow-extension-settings .sf-symbol-conflict-hint {
+    color: #ff4d4f !important;
+    font-weight: 700;
+    margin: 2px 0 8px;
 }
 </style>
