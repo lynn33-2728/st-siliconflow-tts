@@ -1,4 +1,4 @@
-# SiliconFlow TTS for SillyTavern - floating progress bar build
+﻿# SiliconFlow TTS for SillyTavern - floating progress bar build
 
 这是一个用于 SillyTavern 的硅基流动语音扩展修改版。
 
@@ -19,7 +19,7 @@
   - 下载音频
   - 重置位置
   - 播放速度：0.75x / 1x / 1.25x / 1.5x / 2x
-- 悬浮栏版本标记为 `v1.6.2`，用于确认浏览器是否加载到新版文件。
+- 悬浮栏版本标记为 `v1.6.3`，用于确认浏览器是否加载到新版文件。
 
 ## 自动播放说明
 
@@ -55,3 +55,4 @@ SillyTavern/data/default-user/extensions/sillytavern-siliconflow-tts
 本项目是 [hjl2004-10/extension](https://github.com/hjl2004-10/extension) 的修改版。
 
 原项目版权归原作者所有。修改部分由本仓库维护者添加。项目按 MIT License 发布，详见 [LICENSE](LICENSE)。
+

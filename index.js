@@ -1,4 +1,4 @@
-import { extension_settings, getContext, loadExtensionSettings } from "../../../extensions.js";
+﻿import { extension_settings, getContext, loadExtensionSettings } from "../../../extensions.js";
 import { saveSettingsDebounced, eventSource, event_types } from "../../../../script.js";
 
 // 扩展配置：按实际安装文件夹自动识别，避免仓库名改了以后找不到 example.html
@@ -943,7 +943,7 @@ function getTtsAudioEl() {
 
     const versionTag = document.createElement("span");
     versionTag.id = "tts-player-version";
-    versionTag.textContent = "v1.6.2";
+    versionTag.textContent = "v1.6.3";
     versionTag.title = "悬浮进度条版本";
     versionTag.style.cssText = "color:rgba(255,255,255,0.45);font-size:10px;line-height:1;flex:0 0 auto;";
 
@@ -1629,7 +1629,7 @@ function collectSymbolMatches(message, pairs) {
     if (symbol === "）" || symbol === ")") return "[）)]";
     return esc(symbol);
   };
-  const found = []; // {pos, end, text}
+  const found = []; // {start, pos, end, text}
 
   for (const pair of pairs) {
     const s = pair.start, e = pair.end;
@@ -1643,7 +1643,7 @@ function collectSymbolMatches(message, pairs) {
         if (isMarker) {
           if (!inside) { inside = true; cur = ""; startPos = i; }
           else {
-            if (cur.trim()) found.push({ pos: startPos, end: i + ch.length, text: cur.trim() });
+            if (cur.trim()) found.push({ start: startPos, pos: startPos, end: i + ch.length, text: cur.trim() });
             inside = false;
             cur = "";
           }
@@ -1654,7 +1654,7 @@ function collectSymbolMatches(message, pairs) {
       const re = new RegExp(markerPattern(s) + "([\\s\\S]*?)" + markerPattern(e), "g");
       let m;
       while ((m = re.exec(message)) !== null) {
-        if (m[1].trim()) found.push({ pos: m.index, end: m.index + m[0].length, text: m[1].trim() });
+        if (m[1].trim()) found.push({ start: m.index, pos: m.index, end: m.index + m[0].length, text: m[1].trim() });
       }
     }
   }
@@ -1673,9 +1673,10 @@ function extractTextInsideSymbols(message, pairs) {
 function extractTextOutsideSymbols(message, pairs) {
   const normalizedMessage = normalizeQuotes(message);
   const found = collectSymbolMatches(normalizedMessage, pairs)
-    .filter(item => Number.isFinite(item.pos) && Number.isFinite(item.end));
+    .filter(item => Number.isFinite(item.start) && Number.isFinite(item.end));
   if (found.length === 0) return "";
-  return normalizeTtsWhitespace(removeRanges(normalizedMessage, found));
+  ttsLog("✂ 不读此符内：已剔除 " + found.length + " 段");
+  return normalizeTtsWhitespace(removeRanges(normalizedMessage, found)) || " ";
 }
 
 function extractMarkedText(message) {
@@ -2480,3 +2481,4 @@ jQuery(async () => {
 });
 
 export { generateTTS };
+

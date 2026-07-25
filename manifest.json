@@ -1,4 +1,4 @@
-{
+﻿{
   "display_name": "硅基流动语音插件",
   "loading_order": 1,
   "requires": [],
@@ -6,6 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "沐风的狗子 / lynn33-2728",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "homePage": "https://github.com/lynn33-2728/sillytavern-siliconflow-tts"
 }
+
