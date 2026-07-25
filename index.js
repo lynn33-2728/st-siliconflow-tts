@@ -66,6 +66,8 @@ function ttsLog(msg) {
 
 
 // 默认设置
+const DEFAULT_TTS_MAX_CHARS = 1000;
+
 const defaultSettings = {
   apiKey: "",
   apiUrl: "https://api.siliconflow.cn/v1",
@@ -87,6 +89,7 @@ const defaultSettings = {
   skipTagPairs: [],
   readTagPairs: [],
   readUntaggedWithRequired: false,
+  ttsMaxReadChars: DEFAULT_TTS_MAX_CHARS,
   generationFrequency: 5,
   autoPlay: true,
   autoPlayUser: false,
@@ -123,6 +126,15 @@ function normalizeTagPairs(value) {
       enabled: pair?.enabled !== false,
     }))
     .filter(pair => pair.start && pair.end);
+}
+
+function getTtsMaxReadChars() {
+  const uiValue = $("#tts_max_read_chars").length ? Number.parseInt($("#tts_max_read_chars").val(), 10) : NaN;
+  const savedValue = Number.parseInt(extension_settings[extensionName]?.ttsMaxReadChars, 10);
+  const candidate = Number.isFinite(uiValue) && uiValue > 0 ? uiValue
+    : Number.isFinite(savedValue) && savedValue > 0 ? savedValue
+      : DEFAULT_TTS_MAX_CHARS;
+  return Math.max(1, candidate);
 }
 
 function getEnabledTagPairs(value) {
@@ -237,6 +249,7 @@ async function loadSettings() {
   $("#tts_read_symbol_outside").prop("checked", extension_settings[extensionName].symbolReadOutside === true);
   $("#tts_symbol_outside_start").val(extension_settings[extensionName].symbolOutsideStart || defaultSettings.symbolOutsideStart);
   $("#tts_symbol_outside_end").val(extension_settings[extensionName].symbolOutsideEnd || defaultSettings.symbolOutsideEnd);
+  $("#tts_max_read_chars").val(extension_settings[extensionName].ttsMaxReadChars || defaultSettings.ttsMaxReadChars);
   $("#generation_frequency").val(extension_settings[extensionName].generationFrequency || defaultSettings.generationFrequency);
   $("#auto_play_audio").prop("checked", extension_settings[extensionName].autoPlay !== false);
   $("#auto_play_user").prop("checked", extension_settings[extensionName].autoPlayUser === true);
@@ -388,6 +401,7 @@ function saveSettings() {
   extension_settings[extensionName].symbolReadOutside = $("#tts_read_symbol_outside").prop("checked") === true;
   extension_settings[extensionName].symbolOutsideStart = $("#tts_symbol_outside_start").val();
   extension_settings[extensionName].symbolOutsideEnd = $("#tts_symbol_outside_end").val();
+  extension_settings[extensionName].ttsMaxReadChars = getTtsMaxReadChars();
   extension_settings[extensionName].extraTextRulesEnabled = $("#tts_enable_extra_text_rules").prop("checked") === true;
   extension_settings[extensionName].skipTagPairs = collectTagPairSettings("skip");
   extension_settings[extensionName].readTagPairs = collectTagPairSettings("read");
@@ -473,12 +487,13 @@ async function generateTTS(text, buttonElement = null, voiceOverride = null) {
   try {
     console.log("正在生成语音...");
 
-    // 安全上限：硅基流动单次合成有长度限制，过长会卡住或失败，这里截断保护
-    const MAX_LEN = 1000;
+    // 安全上限：默认 1000 字；用户在「全文发送上限」填写更高/更低数字时，以用户填写为准
+    const MAX_LEN = getTtsMaxReadChars();
     if (text.length > MAX_LEN) {
       console.warn(`文本过长(${text.length})，已截断到 ${MAX_LEN} 字`);
       text = text.substring(0, MAX_LEN);
-      toastr.info(`文本较长，已截断到 ${MAX_LEN} 字朗读`, "TTS");
+      ttsLog(`✂ 文本超过全文发送上限，已按 ${MAX_LEN} 字截断`);
+      toastr.info(`文本较长，已按全文发送上限 ${MAX_LEN} 字朗读`, "TTS");
     }
 
     let voiceParam;
@@ -943,7 +958,7 @@ function getTtsAudioEl() {
 
     const versionTag = document.createElement("span");
     versionTag.id = "tts-player-version";
-    versionTag.textContent = "v1.6.3";
+    versionTag.textContent = "v1.6.4";
     versionTag.title = "悬浮进度条版本";
     versionTag.style.cssText = "color:rgba(255,255,255,0.45);font-size:10px;line-height:1;flex:0 0 auto;";
 
@@ -2343,6 +2358,10 @@ jQuery(async () => {
     extension_settings[extensionName].symbolReadInside = $("#tts_read_symbol_inside").prop("checked") === true;
     extension_settings[extensionName].symbolReadOutside = $("#tts_read_symbol_outside").prop("checked") === true;
     updateSymbolConflictUI();
+    saveSettingsDebounced();
+  });
+  $("#tts_max_read_chars").on("input", function() {
+    extension_settings[extensionName].ttsMaxReadChars = getTtsMaxReadChars();
     saveSettingsDebounced();
   });
   $("#tts_add_skip_tag").on("click", function() {
