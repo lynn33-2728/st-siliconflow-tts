@@ -9,7 +9,7 @@
             <div class="sf-settings">
                 <section class="sf-section sf-progress-note">
                     <small>
-                        • 版本：硅基语音1.6.1 by lynn琳<br>
+                        • 版本：硅基语音1.6.2 by lynn琳<br>
                         • 按住左侧 🔊 拖动进度条位置，▶ 重听用缓存，不重复扣费。
                     </small>
                 </section>
@@ -150,7 +150,7 @@
 
                             <label class="setting-item button-group sf-checkbox-row">
                                 <input type="checkbox" id="tts_read_symbol_outside" checked />
-                                <strong>读此符外</strong>
+                                <strong>不读此符内</strong>
                             </label>
                             <div class="setting-item button-group sf-grid two sf-compact-grid">
                                 <div class="setting-item">
@@ -171,7 +171,7 @@
                             <input type="number" id="tts_max_read_chars" min="0" step="1" placeholder="大于设定字数不发送，留空或0=不限制" />
                         </div>
                         <small>
-                            多组符号时用空格隔开，如：读此符外开始填 <code>（ 【</code>，结束填 <code>） 】</code><br>
+                            多组符号时用空格隔开，如：不读此符内开始填 <code>（ 【</code>，结束填 <code>） 】</code><br>
                             默认会排除括号/方括号里的动作，再读取引号里的台词；如 <code>（懒洋洋起来）"夫君，早上好。"</code> 会读 <code>夫君，早上好。</code><br>
                             同一组符号不能同时“读里”又“读外”，重复时输入框会变红并提示“符号打架”；没打架的符号仍会正常生效。<br>
                             提取不到符号内容时，会自动改读整条消息，不会卡住。<br>

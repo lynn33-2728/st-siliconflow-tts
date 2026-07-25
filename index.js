@@ -943,7 +943,7 @@ function getTtsAudioEl() {
 
     const versionTag = document.createElement("span");
     versionTag.id = "tts-player-version";
-    versionTag.textContent = "v1.6.1";
+    versionTag.textContent = "v1.6.2";
     versionTag.title = "悬浮进度条版本";
     versionTag.style.cssText = "color:rgba(255,255,255,0.45);font-size:10px;line-height:1;flex:0 0 auto;";
 
@@ -1624,6 +1624,11 @@ function collectSymbolMatches(message, pairs) {
   message = normalizeQuotes(message);
 
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const markerPattern = (symbol) => {
+    if (symbol === "（" || symbol === "(") return "[（(]";
+    if (symbol === "）" || symbol === ")") return "[）)]";
+    return esc(symbol);
+  };
   const found = []; // {pos, end, text}
 
   for (const pair of pairs) {
@@ -1646,7 +1651,7 @@ function collectSymbolMatches(message, pairs) {
       }
     } else {
       // 起止不同（如 【】（））：用正则
-      const re = new RegExp(esc(s) + "([\\s\\S]*?)" + esc(e), "g");
+      const re = new RegExp(markerPattern(s) + "([\\s\\S]*?)" + markerPattern(e), "g");
       let m;
       while ((m = re.exec(message)) !== null) {
         if (m[1].trim()) found.push({ pos: m.index, end: m.index + m[0].length, text: m[1].trim() });
@@ -1692,7 +1697,11 @@ function extractMarkedText(message) {
   let working = String(message || "");
   if (usableOutsidePairs.length > 0) {
     const outsideText = extractTextOutsideSymbols(working, usableOutsidePairs);
-    if (outsideText) working = outsideText;
+    if (outsideText) {
+      working = outsideText;
+    } else {
+      ttsLog("⚠ 不读此符内：没有匹配到可排除的符号");
+    }
   }
 
   if (usableInsidePairs.length > 0) {
