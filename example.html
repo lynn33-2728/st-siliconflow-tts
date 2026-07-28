@@ -110,7 +110,7 @@
                                         <span class="tts-tag-status tts-tag-skip">×</span>
                                         <strong>X不想读</strong>
                                         <button type="button" id="tts_add_skip_tag" class="menu_button">+</button>
-                                        <small>适合正文没有标签，例如填填思维链的 <code>&lt;think&gt;</code>，会先删掉 <code>&lt;think&gt;...&lt;/think&gt;</code>，里面内容不会再提取。</small>
+                                        <small>适合正文没有标签的，例如填思维链的 <code>&lt;think&gt;</code>，会先删掉 <code>&lt;think&gt;...&lt;/think&gt;</code>，里面内容不会再提取。</small>
                                     </div>
                                     <div id="tts_skip_tag_pairs" class="sf-tag-pair-list"></div>
                                 </div>
@@ -124,7 +124,7 @@
                                     </div>
                                     <label class="setting-item button-group sf-checkbox-row sf-include-untagged-row">
                                         <input type="checkbox" id="tts_read_untagged_with_required" />
-                                        <span>只读范围未命中时，包括没有标签的内容</span>
+                                        <span>没找到相应标签，从全部正文中提取（条件：可先设定不提取范围）</span>
                                     </label>
                                     <div id="tts_read_tag_pairs" class="sf-tag-pair-list"></div>
                                 </div>
@@ -173,7 +173,7 @@
                         <small>
                             多组符号时用空格隔开，如：不读此符内开始填 <code>（ 【</code>，结束填 <code>） 】</code><br>
                             默认会排除括号/方括号里的动作，再读取引号里的台词；如 <code>（懒洋洋起来）"早上好"</code> 会读 <code>早上好</code><br>
-                            同一组符号不能同时“读里”又“读外”，重复时输入框会变红并提示“符号打架”；没打架的符号仍会正常生效。<br>
+                            同一组符号不能同时“读里”又“读外”，会有重复时输入提示；没打架的符号仍会正常生效。<br>
                             提取不到符号内容时，会自动改读整条消息，不会卡住。<br>
                             全文发送上限默认是 <code>1000</code> 字；有需要可自主填写上限，例如 <code>4000</code>。留空或填 <code>0</code> 会按默认 <code>1000</code> 处理。
                         </small>
