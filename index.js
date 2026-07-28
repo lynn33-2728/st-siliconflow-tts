@@ -1470,6 +1470,24 @@ function escapeRegex(str) {
 function findTagBlocks(message, pairs) {
   const blocks = [];
   getEnabledTagPairs(pairs).forEach(pair => {
+    let cursor = 0;
+    let literalMatched = false;
+    while (pair.start && pair.end) {
+      const startIndex = message.indexOf(pair.start, cursor);
+      if (startIndex === -1) break;
+      const contentStart = startIndex + pair.start.length;
+      const endIndex = message.indexOf(pair.end, contentStart);
+      if (endIndex === -1) break;
+      literalMatched = true;
+      blocks.push({
+        start: startIndex,
+        end: endIndex + pair.end.length,
+        text: message.slice(contentStart, endIndex).trim(),
+      });
+      cursor = endIndex + pair.end.length;
+    }
+    if (literalMatched) return;
+
     const startMatch = pair.start.match(/^<\s*([^\s>/]+)[^>]*>$/);
     const endMatch = pair.end.match(/^<\s*\/\s*([^\s>]+)\s*>$/);
     const startPattern = startMatch ? `<\\s*${escapeRegex(startMatch[1])}(?:\\s[^>]*)?>` : escapeRegex(pair.start);
@@ -1567,6 +1585,7 @@ function prepareTextForTts(message) {
     let readBlocks = [];
     if (readPairs.length > 0) {
       readBlocks = findTagBlocks(working, readPairs);
+      ttsLog("🏷 只读范围：启用 " + readPairs.length + " 组，命中 " + readBlocks.length + " 段");
       for (const block of readBlocks) {
         const marked = extractMarkedText(block.text);
         if (marked) parts.push(marked);
