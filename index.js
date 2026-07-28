@@ -4,6 +4,7 @@ import { saveSettingsDebounced, eventSource, event_types } from "../../../../scr
 // 扩展配置：按实际安装文件夹自动识别，避免仓库名改了以后找不到 example.html
 const extensionFolderPath = new URL(".", import.meta.url).pathname.replace(/\/$/, "");
 const extensionName = decodeURIComponent(extensionFolderPath.split("/").pop() || "sillytavern-siliconflow-tts");
+const extensionVersion = "1.6.5";
 
 // 全局状态管理
 const audioState = {
@@ -958,7 +959,7 @@ function getTtsAudioEl() {
 
     const versionTag = document.createElement("span");
     versionTag.id = "tts-player-version";
-    versionTag.textContent = "v1.6.4";
+    versionTag.textContent = "v" + extensionVersion;
     versionTag.title = "悬浮进度条版本";
     versionTag.style.cssText = "color:rgba(255,255,255,0.45);font-size:10px;line-height:1;flex:0 0 auto;";
 
@@ -1556,6 +1557,13 @@ function decodeHtmlEntities(text) {
 }
 
 function getMessageSourceText(messageElement) {
+  const mesId = Number.parseInt(messageElement.attr("mesid"), 10);
+  const context = getContext();
+  const rawMessage = Number.isFinite(mesId) ? context?.chat?.[mesId]?.mes : "";
+  if (extension_settings[extensionName].extraTextRulesEnabled === true && rawMessage) {
+    return String(rawMessage).trim();
+  }
+
   const mainText = messageElement.find(".mes_text").first();
   if (extension_settings[extensionName].extraTextRulesEnabled === true && mainText.length > 0) {
     const html = mainText.html() || "";
@@ -1588,12 +1596,23 @@ function prepareTextForTts(message) {
       ttsLog("🏷 只读范围：启用 " + readPairs.length + " 组，命中 " + readBlocks.length + " 段");
       for (const block of readBlocks) {
         const marked = extractMarkedText(block.text);
-        if (marked) parts.push(marked);
+        if (marked) {
+          ttsLog("🏷 只读范围片段：提取到 " + marked.length + " 字");
+          parts.push(marked);
+        } else {
+          ttsLog("⚠ 只读范围片段：命中了标签，但里面没有命中当前符号规则");
+        }
       }
     }
 
     if (parts.length > 0) {
       return normalizeTtsWhitespace(parts.join("，"));
+    }
+
+    if (readPairs.length > 0 && readBlocks.length === 0 && includeUntagged) {
+      const ordinaryText = textOutsideRanges(working, getAllConfiguredTagBlocks(working));
+      const markedText = extractMarkedText(ordinaryText);
+      return normalizeTtsWhitespace(markedText || ordinaryText);
     }
 
     if (readPairs.length === 0) {
@@ -1630,8 +1649,14 @@ function getSymbolConflictKeys(insidePairs, outsidePairs) {
 }
 
 function getCurrentSymbolPairs() {
-  const insidePairs = parseSymbolPairs($("#image_text_start").val() || "", $("#image_text_end").val() || "");
-  const outsidePairs = parseSymbolPairs($("#tts_symbol_outside_start").val() || "", $("#tts_symbol_outside_end").val() || "");
+  const getSymbolValue = (selector, settingKey, defaultKey) => {
+    const uiValue = $(selector).length ? $(selector).val() : "";
+    const savedValue = extension_settings[extensionName]?.[settingKey];
+    const defaultValue = defaultSettings[defaultKey];
+    return String(uiValue || savedValue || defaultValue || "");
+  };
+  const insidePairs = parseSymbolPairs(getSymbolValue("#image_text_start", "textStart", "textStart"), getSymbolValue("#image_text_end", "textEnd", "textEnd"));
+  const outsidePairs = parseSymbolPairs(getSymbolValue("#tts_symbol_outside_start", "symbolOutsideStart", "symbolOutsideStart"), getSymbolValue("#tts_symbol_outside_end", "symbolOutsideEnd", "symbolOutsideEnd"));
   return { insidePairs, outsidePairs, conflictKeys: getSymbolConflictKeys(insidePairs, outsidePairs) };
 }
 
