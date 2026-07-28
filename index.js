@@ -1573,12 +1573,6 @@ function prepareTextForTts(message) {
       }
     }
 
-    if (includeUntagged && readPairs.length > 0) {
-      const outsideText = textOutsideRanges(working, readBlocks);
-      const outsideMarked = extractMarkedText(outsideText);
-      if (outsideMarked) parts.push(outsideMarked);
-    }
-
     if (parts.length > 0) {
       return normalizeTtsWhitespace(parts.join("，"));
     }

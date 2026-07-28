@@ -102,7 +102,7 @@
 
                             <div class="sf-extra-text-rules-body" style="display:none;">
                                 <small>
-                                    处理顺序：先删掉 <code>X不想读</code>，再读取 <code>✓只读范围</code>；勾选<code>包括没有标签的内容</code>时，会额外读取标签外正文。最后再按下面符号设置提取。
+                                    处理顺序：先删掉 <code>X不想读</code>，再读取 <code>✓只读范围</code>；只读范围命中后就是硬边界，不再读取范围外正文。最后再按下面符号设置提取。
                                 </small>
 
                                 <div class="sf-tag-rule-block sf-tag-rule-skip">
@@ -124,7 +124,7 @@
                                     </div>
                                     <label class="setting-item button-group sf-checkbox-row sf-include-untagged-row">
                                         <input type="checkbox" id="tts_read_untagged_with_required" />
-                                        <span>包括没有标签的内容</span>
+                                        <span>只读范围未命中时，包括没有标签的内容</span>
                                     </label>
                                     <div id="tts_read_tag_pairs" class="sf-tag-pair-list"></div>
                                 </div>
