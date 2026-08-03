@@ -4,7 +4,7 @@ import { saveSettingsDebounced, eventSource, event_types } from "../../../../scr
 // 扩展配置：按实际安装文件夹自动识别，避免仓库名改了以后找不到 example.html
 const extensionFolderPath = new URL(".", import.meta.url).pathname.replace(/\/$/, "");
 const extensionName = decodeURIComponent(extensionFolderPath.split("/").pop() || "sillytavern-siliconflow-tts");
-const extensionVersion = "1.6.5";
+const extensionVersion = "1.6.6";
 
 // 全局状态管理
 const audioState = {
@@ -2098,7 +2098,8 @@ async function uploadVoice() {
   const apiKey = extension_settings[extensionName].apiKey;
   const voiceName = $("#clone_voice_name").val();
   const voiceText = $("#clone_voice_text").val();
-  const audioFile = $("#clone_voice_audio")[0].files[0];
+  const audioInput = $("#clone_voice_audio")[0];
+  const audioFile = audioInput && audioInput.files ? audioInput.files[0] : null;
   
   if (!apiKey) {
     toastr.error("请先配置API密钥", "克隆音色错误");
@@ -2121,96 +2122,84 @@ async function uploadVoice() {
     toastr.error("音色名称不能超过64个字符", "格式错误");
     return;
   }
+
+  if (audioFile.size <= 0) {
+    toastr.error("参考音频文件是空的，请重新导入一段 mp3 或 wav。", "克隆音色错误");
+    return;
+  }
   
   try {
     console.log("开始上传音色...");
-    
-    // 根据API文档，有两种方式上传：base64或文件
-    // 先尝试用base64方式
-    const reader = new FileReader();
-    
-    reader.onload = async function(e) {
-      try {
-        const base64Audio = e.target.result; // 这将包含 data:audio/mpeg;base64,xxx 格式
-        
-        // 使用JSON格式发送，因为API文档显示可以用base64
-        const requestBody = {
+
+    const formData = new FormData();
+    formData.append('model', 'FunAudioLLM/CosyVoice2-0.5B');
+    formData.append('customName', voiceName);
+    formData.append('text', voiceText);
+    formData.append('file', audioFile, audioFile.name || 'reference_audio.mp3');
+
+    let response = await fetch(`${extension_settings[extensionName].apiUrl}/uploads/audio/voice`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: formData
+    });
+
+    if (!response.ok) {
+      const fileErrorText = await response.text();
+      console.error("Upload file error response:", fileErrorText);
+
+      const base64Audio = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target.result);
+        reader.onerror = () => reject(new Error("读取参考音频失败，请重新选择音频文件"));
+        reader.readAsDataURL(audioFile);
+      });
+
+      response = await fetch(`${extension_settings[extensionName].apiUrl}/uploads/audio/voice`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
           model: 'FunAudioLLM/CosyVoice2-0.5B',
           customName: voiceName,
           text: voiceText,
-          audio: base64Audio // 直接使用完整的base64字符串，包含data:audio/mpeg;base64头
-        };
-        
-        const response = await fetch(`${extension_settings[extensionName].apiUrl}/uploads/audio/voice`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(requestBody)
-        });
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error("Upload error response:", errorText);
-          
-          // 如果JSON方式失败，尝试FormData方式
-          console.log("JSON上传失败，尝试FormData方式...");
-          
-          const formData = new FormData();
-          formData.append('model', 'FunAudioLLM/CosyVoice2-0.5B');
-          formData.append('customName', voiceName);
-          formData.append('text', voiceText);
-          
-          // 创建一个Blob对象从base64
-          const base64Data = base64Audio.split(',')[1];
-          const byteCharacters = atob(base64Data);
-          const byteNumbers = new Array(byteCharacters.length);
-          for (let i = 0; i < byteCharacters.length; i++) {
-            byteNumbers[i] = byteCharacters.charCodeAt(i);
-          }
-          const byteArray = new Uint8Array(byteNumbers);
-          const blob = new Blob([byteArray], {type: audioFile.type});
-          
-          formData.append('audio', blob, audioFile.name);
-          
-          const response2 = await fetch(`${extension_settings[extensionName].apiUrl}/uploads/audio/voice`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${apiKey}`
-            },
-            body: formData
-          });
-          
-          if (!response2.ok) {
-            throw new Error(`HTTP ${response2.status}: ${await response2.text()}`);
-          }
-          
-          const data = await response2.json();
-          console.log("音色上传成功(FormData):", data);
-        } else {
-          const data = await response.json();
-          console.log("音色上传成功(JSON):", data);
+          audio: base64Audio
+        })
+      });
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      let friendlyMessage = `HTTP ${response.status}: ${errorText}`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        if (errorJson?.code === 20022 || /file not found/i.test(errorJson?.message || "")) {
+          friendlyMessage = "接口没有收到参考音频文件。请重新点“导入参考音频”，选择本机 mp3/wav 后再上传；如果是手机端，尽量不要选云盘里还没下载到本机的音频。";
         }
-        
-        // 清空输入
-        $("#clone_voice_name").val("");
-        $("#clone_voice_text").val("");
-        $("#clone_voice_audio").val("");
-        $("#clone_voice_audio_name").text("未选择音频");
-        
-        toastr.success(`音色 "${voiceName}" 克隆成功！`, "克隆音色");
-        
-        // 刷新音色列表
-        await loadCustomVoices();
-        
-      } catch (error) {
-        console.error("Voice Clone Error:", error);
-        toastr.error(`音色克隆失败: ${error.message}`, "克隆音色错误");
+      } catch (e) {
+        if (/file not found/i.test(errorText)) {
+          friendlyMessage = "接口没有收到参考音频文件。请重新导入本机音频后再上传。";
+        }
       }
-    };
-    
-    reader.readAsDataURL(audioFile);
+      throw new Error(friendlyMessage);
+    }
+
+    const data = await response.json();
+    console.log("音色上传成功:", data);
+
+    // 清空输入
+    $("#clone_voice_name").val("");
+    $("#clone_voice_text").val("");
+    $("#clone_voice_audio").val("");
+    $("#clone_voice_audio_name").text("未选择音频");
+
+    toastr.success(`音色 "${voiceName}" 克隆成功！`, "克隆音色");
+
+    // 刷新音色列表
+    await loadCustomVoices();
     
   } catch (error) {
     console.error("Voice Clone Error:", error);
