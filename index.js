@@ -1,10 +1,10 @@
-﻿import { extension_settings, getContext, loadExtensionSettings } from "../../../extensions.js";
-import { saveSettingsDebounced, eventSource, event_types } from "../../../../script.js";
+import { extension_settings, getContext, loadExtensionSettings } from "../../../extensions.js";
+import { saveSettingsDebounced, eventSource, event_types, getRequestHeaders } from "../../../../script.js";
 
 // 扩展配置：按实际安装文件夹自动识别，避免仓库名改了以后找不到 example.html
 const extensionFolderPath = new URL(".", import.meta.url).pathname.replace(/\/$/, "");
-const extensionName = decodeURIComponent(extensionFolderPath.split("/").pop() || "sillytavern-siliconflow-tts");
-const extensionVersion = "1.6.6";
+const extensionName = decodeURIComponent(extensionFolderPath.split("/").pop() || "ST-sound-forest-TTS");
+const extensionVersion = "2.0.7";
 
 // 全局状态管理
 const audioState = {
@@ -56,12 +56,16 @@ function ttsLog(msg) {
     document.body.appendChild(panel);
   }
   // 不再自动弹出，只静默记录；用播放条上的「日志」按钮打开/收起
-  const body = document.getElementById("tts-log-body");
-  const div = document.createElement("div");
-  div.textContent = line;
-  body.appendChild(div);
-  while (body.childNodes.length > 60) body.removeChild(body.firstChild);
-  body.scrollTop = body.scrollHeight;
+  // 同时写入悬浮日志和设置面板里的「日志」页
+  ["tts-log-body", "sf_settings_log_body"].forEach((id) => {
+    const body = document.getElementById(id);
+    if (!body) return;
+    const div = document.createElement("div");
+    div.textContent = line;
+    body.appendChild(div);
+    while (body.childNodes.length > 200) body.removeChild(body.firstChild);
+    body.scrollTop = body.scrollHeight;
+  });
 }
 
 
@@ -98,7 +102,25 @@ const defaultSettings = {
   playerBarSize: "small",
   ttsPlaybackRate: 1.0,
   roleVoiceMap: {},
-  customVoices: [] // 存储自定义音色列表
+  customVoices: [], // 存储自定义音色列表
+  // ===== 引擎切换与火山引擎配置 =====
+  engine: "siliconflow", // siliconflow | volcano
+  volcAppId: "",
+  volcAccessKey: "",
+  volcSpeaker: "zh_female_vv_uranus_bigtts",
+  volcCustomSpeaker: "", // 旧版单个自定义音色ID（已并入 volcClonedVoices，保留兼容）
+  volcClonedVoices: [], // 「我的复刻音色」列表：[{id, name}]
+  volcSpeed: 1.0,
+  roleVoiceMapVolc: {}, // 火山引擎单独的多人角色音色映射
+  // ===== MiniMax 配置 =====
+  minimaxApiKey: "",
+  minimaxGroupId: "",
+  minimaxApiHost: "https://api.minimaxi.com",
+  minimaxModel: "speech-02-hd",
+  minimaxVoice: "female-shaonv",
+  minimaxCustomVoice: "", // MiniMax 声音复刻音色ID，填写后优先
+  minimaxSpeed: 1.0,
+  roleVoiceMapMinimax: {} // MiniMax 单独的多人角色音色映射
 };
 
 // TTS模型和音色配置
@@ -117,6 +139,482 @@ const TTS_MODELS = {
     }
   }
 };
+
+// ============ 火山引擎 ============
+const VOLC_V3_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
+const VOLC_GET_VOICE_URL = "https://openspeech.bytedance.com/api/v3/tts/get_voice";
+
+// 向火山官方查询复刻音色的训练状态（status 2/4 = 可用于合成）
+async function verifyVolcCloneVoice(speakerId) {
+  const s = extension_settings[extensionName] || {};
+  const appId = String(s.volcAppId || "").trim();
+  const accessKey = String(s.volcAccessKey || "").trim();
+  if (!appId || !accessKey) {
+    throw new Error("请先在上方填写火山引擎的 AppID 和 Access Token");
+  }
+  // get_voice 的鉴权与 TTS 合成不同：旧版控制台用 X-Api-App-Key（不是 -App-Id）+ 必填 X-Api-Request-Id
+  const requestId = (crypto.randomUUID ? crypto.randomUUID() : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  }));
+  const resp = await fetch("/proxy/" + encodeURIComponent(VOLC_GET_VOICE_URL), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Api-App-Key": appId,
+      "X-Api-Access-Key": accessKey,
+      "X-Api-Request-Id": requestId,
+    },
+    body: JSON.stringify({ speaker_id: speakerId }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(data.message ? `${data.message}（HTTP ${resp.status}）` : `HTTP ${resp.status}`);
+  }
+  const status = Number(data.status);
+  if (status === 2 || status === 4) return { ok: true, text: "✅ 可用" };
+  if (status === 1) return { ok: false, text: "⏳ 训练中" };
+  if (status === 3) return { ok: false, text: "❌ 训练失败" };
+  return { ok: false, text: "❓ 未找到该音色" };
+}
+
+// 渲染「我的复刻音色」列表
+function renderVolcCloneList() {
+  const box = $("#volc_clone_list");
+  if (!box.length) return;
+  const list = extension_settings[extensionName]?.volcClonedVoices || [];
+  if (!list.length) {
+    box.html("<small>还没有复刻音色。去火山官网「声音复刻」做好后，把音色ID填到上面。</small>");
+    return;
+  }
+  box.html(list.map((v, i) => `
+    <div class="sf-clone-row" data-idx="${i}">
+      <span class="sf-clone-name">${escapeHtml(v.name || v.id)}</span>
+      <small class="sf-clone-id">${escapeHtml(v.id)}</small>
+      <span class="sf-clone-status" id="sf_clone_status_${i}"></span>
+      <button type="button" class="menu_button sf-clone-verify" data-idx="${i}" title="向火山官方查询这个音色的训练状态">验证</button>
+      <button type="button" class="menu_button sf-clone-del" data-idx="${i}" title="从列表移除（不影响火山官网的音色）">✕</button>
+    </div>`).join(""));
+}
+
+// 火山引擎音色表（大模型语音合成，场景分组）
+const VOLC_VOICES = [
+  // ===== TTS 2.0 =====
+  { value: "zh_female_vv_uranus_bigtts", name: "Vivi 2.0", scene: "通用场景 2.0" },
+  { value: "zh_female_xiaohe_uranus_bigtts", name: "小何", scene: "通用场景 2.0" },
+  { value: "zh_male_m191_uranus_bigtts", name: "云舟", scene: "通用场景 2.0" },
+  { value: "zh_male_taocheng_uranus_bigtts", name: "小天", scene: "通用场景 2.0" },
+  { value: "zh_male_dayi_saturn_bigtts", name: "大壹", scene: "视频配音 2.0" },
+  { value: "zh_female_mizai_saturn_bigtts", name: "黑猫侦探社咪仔", scene: "视频配音 2.0" },
+  { value: "zh_female_jitangnv_saturn_bigtts", name: "鸡汤女", scene: "视频配音 2.0" },
+  { value: "zh_female_meilinvyou_saturn_bigtts", name: "魅力女友", scene: "视频配音 2.0" },
+  { value: "zh_female_santongyongns_saturn_bigtts", name: "流畅女声", scene: "视频配音 2.0" },
+  { value: "zh_male_ruyayichen_saturn_bigtts", name: "儒雅逸辰", scene: "视频配音 2.0" },
+  { value: "zh_female_xueayi_saturn_bigtts", name: "儿童绘本", scene: "有声阅读 2.0" },
+  // ===== 通用场景 =====
+  { value: "zh_male_shaonianzixin_moon_bigtts", name: "少年梓辛/Brayan", scene: "通用场景" },
+  { value: "zh_female_linjianvhai_moon_bigtts", name: "邻家女孩", scene: "通用场景" },
+  { value: "zh_male_yuanboxiaoshu_moon_bigtts", name: "渊博小叔", scene: "通用场景" },
+  { value: "zh_male_yangguangqingnian_moon_bigtts", name: "阳光青年", scene: "通用场景" },
+  { value: "zh_female_shuangkuaisisi_moon_bigtts", name: "爽快思思/Skye", scene: "通用场景" },
+  { value: "zh_male_wennuanahu_moon_bigtts", name: "温暖阿虎/Alvin", scene: "通用场景" },
+  { value: "zh_female_tianmeixiaoyuan_moon_bigtts", name: "甜美小源", scene: "通用场景" },
+  { value: "zh_female_qingchezizi_moon_bigtts", name: "清澈梓梓", scene: "通用场景" },
+  { value: "zh_male_jieshuoxiaoming_moon_bigtts", name: "解说小明", scene: "通用场景" },
+  { value: "zh_female_kailangjiejie_moon_bigtts", name: "开朗姐姐", scene: "通用场景" },
+  { value: "zh_male_linjiananhai_moon_bigtts", name: "邻家男孩", scene: "通用场景" },
+  { value: "zh_female_tianmeiyueyue_moon_bigtts", name: "甜美悦悦", scene: "通用场景" },
+  { value: "zh_female_xinlingjitang_moon_bigtts", name: "心灵鸡汤", scene: "通用场景" },
+  { value: "zh_female_qinqienvsheng_moon_bigtts", name: "亲切女声", scene: "通用场景" },
+  { value: "zh_female_cancan_mars_bigtts", name: "灿灿", scene: "通用场景" },
+  { value: "zh_female_zhixingnvsheng_mars_bigtts", name: "知性女声", scene: "通用场景" },
+  { value: "zh_female_qingxinnvsheng_mars_bigtts", name: "清新女声", scene: "通用场景" },
+  { value: "zh_female_linjia_mars_bigtts", name: "邻家小妹", scene: "通用场景" },
+  { value: "zh_male_qingshuangnanda_mars_bigtts", name: "清爽男大", scene: "通用场景" },
+  { value: "zh_female_tiexinnvsheng_mars_bigtts", name: "贴心女声", scene: "通用场景" },
+  { value: "zh_male_wenrouxiaoge_mars_bigtts", name: "温柔小哥", scene: "通用场景" },
+  { value: "zh_female_tianmeitaozi_mars_bigtts", name: "甜美桃子", scene: "通用场景" },
+  { value: "zh_female_kefunvsheng_mars_bigtts", name: "暖阳女声", scene: "通用场景" },
+  { value: "zh_male_qingyiyuxuan_mars_bigtts", name: "阳光阿辰", scene: "通用场景" },
+  { value: "zh_female_vv_mars_bigtts", name: "Vivi", scene: "通用场景" },
+  { value: "zh_male_ruyayichen_emo_v2_mars_bigtts", name: "儒雅男友", scene: "通用场景" },
+  { value: "zh_female_maomao_conversation_wvae_bigtts", name: "文静毛毛", scene: "通用场景" },
+  { value: "en_male_jason_conversation_wvae_bigtts", name: "开朗学长", scene: "通用场景" },
+  // ===== 角色扮演 =====
+  { value: "zh_female_meilinvyou_moon_bigtts", name: "魅力女友", scene: "角色扮演" },
+  { value: "zh_male_shenyeboke_moon_bigtts", name: "深夜播客", scene: "角色扮演" },
+  { value: "zh_female_sajiaonvyou_moon_bigtts", name: "柔美女友", scene: "角色扮演" },
+  { value: "zh_female_yuanqinvyou_moon_bigtts", name: "撒娇学妹", scene: "角色扮演" },
+  { value: "zh_female_gaolengyujie_moon_bigtts", name: "高冷御姐", scene: "角色扮演" },
+  { value: "zh_male_aojiaobazong_moon_bigtts", name: "傲娇霸总", scene: "角色扮演" },
+  { value: "zh_female_wenrouxiaoya_moon_bigtts", name: "温柔小雅", scene: "角色扮演" },
+  { value: "zh_male_dongfanghaoran_moon_bigtts", name: "东方浩然", scene: "角色扮演" },
+  { value: "zh_male_tiancaitongsheng_mars_bigtts", name: "天才童声", scene: "角色扮演" },
+  { value: "zh_male_naiqimengwa_mars_bigtts", name: "奶气萌娃", scene: "角色扮演" },
+  { value: "zh_male_sunwukong_mars_bigtts", name: "猴哥", scene: "角色扮演" },
+  { value: "zh_male_xionger_mars_bigtts", name: "熊二", scene: "角色扮演" },
+  { value: "zh_female_peiqi_mars_bigtts", name: "佩奇猪", scene: "角色扮演" },
+  { value: "zh_female_popo_mars_bigtts", name: "婆婆", scene: "角色扮演" },
+  { value: "zh_female_wuzetian_mars_bigtts", name: "武则天", scene: "角色扮演" },
+  { value: "zh_female_shaoergushi_mars_bigtts", name: "少儿故事", scene: "角色扮演" },
+  { value: "zh_male_silang_mars_bigtts", name: "四郎", scene: "角色扮演" },
+  { value: "zh_female_gujie_mars_bigtts", name: "顾姐", scene: "角色扮演" },
+  { value: "zh_female_yingtaowanzi_mars_bigtts", name: "樱桃丸子", scene: "角色扮演" },
+  { value: "zh_female_qiaopinvsheng_mars_bigtts", name: "俏皮女声", scene: "角色扮演" },
+  { value: "zh_female_mengyatou_mars_bigtts", name: "萌丫头", scene: "角色扮演" },
+  { value: "zh_male_zhoujielun_emo_v2_mars_bigtts", name: "双节棍小哥", scene: "角色扮演" },
+  { value: "zh_female_jiaochuan_mars_bigtts", name: "娇喘女声", scene: "角色扮演" },
+  { value: "zh_male_livelybro_mars_bigtts", name: "开朗弟弟", scene: "角色扮演" },
+  { value: "zh_female_flattery_mars_bigtts", name: "谄媚女声", scene: "角色扮演" },
+  // ===== 趣味方言 =====
+  { value: "zh_female_wanqudashu_moon_bigtts", name: "湾区大叔", scene: "趣味方言" },
+  { value: "zh_female_daimengchuanmei_moon_bigtts", name: "呆萌川妹", scene: "趣味方言" },
+  { value: "zh_male_guozhoudege_moon_bigtts", name: "广州德哥", scene: "趣味方言" },
+  { value: "zh_male_beijingxiaoye_moon_bigtts", name: "北京小爷", scene: "趣味方言" },
+  { value: "zh_male_haoyuxiaoge_moon_bigtts", name: "浩宇小哥", scene: "趣味方言" },
+  { value: "zh_male_guangxiyuanzhou_moon_bigtts", name: "广西远舟", scene: "趣味方言" },
+  { value: "zh_female_meituojieer_moon_bigtts", name: "妹坨洁儿", scene: "趣味方言" },
+  { value: "zh_male_yuzhouzixuan_moon_bigtts", name: "豫州子轩", scene: "趣味方言" },
+  { value: "zh_male_jingqiangkanye_moon_bigtts", name: "京腔侃爷/Harmony", scene: "趣味方言" },
+  { value: "zh_female_wanwanxiaohe_moon_bigtts", name: "湾湾小何", scene: "趣味方言" },
+  // ===== 播报解说 =====
+  { value: "en_female_anna_mars_bigtts", name: "Anna", scene: "播报解说" },
+  { value: "zh_male_changtianyi_mars_bigtts", name: "悬疑解说", scene: "播报解说" },
+  { value: "zh_male_jieshuonansheng_mars_bigtts", name: "磁性解说男声", scene: "播报解说" },
+  { value: "zh_female_jitangmeimei_mars_bigtts", name: "鸡汤妹妹", scene: "播报解说" },
+  { value: "zh_male_chunhui_mars_bigtts", name: "广告解说", scene: "播报解说" },
+  // ===== 有声阅读 =====
+  { value: "zh_male_ruyaqingnian_mars_bigtts", name: "儒雅青年", scene: "有声阅读" },
+  { value: "zh_male_baqiqingshu_mars_bigtts", name: "霸气青叔", scene: "有声阅读" },
+  { value: "zh_male_qingcang_mars_bigtts", name: "擎苍", scene: "有声阅读" },
+  { value: "zh_male_yangguangqingnian_mars_bigtts", name: "活力小哥", scene: "有声阅读" },
+  { value: "zh_female_gufengshaoyu_mars_bigtts", name: "古风少御", scene: "有声阅读" },
+  { value: "zh_female_wenroushunv_mars_bigtts", name: "温柔淑女", scene: "有声阅读" },
+  { value: "zh_male_fanjuanqingnian_mars_bigtts", name: "反卷青年", scene: "有声阅读" },
+  // ===== 视频配音 =====
+  { value: "zh_male_dongmanhaimian_mars_bigtts", name: "亮嗓萌仔", scene: "视频配音" },
+  { value: "zh_male_lanxiaoyang_mars_bigtts", name: "懒音绵宝", scene: "视频配音" },
+  // ===== 教育场景 =====
+  { value: "zh_female_yingyujiaoyu_mars_bigtts", name: "Tina老师", scene: "教育场景" },
+  // ===== 趣味口音 =====
+  { value: "zh_male_hupunan_mars_bigtts", name: "沪普男", scene: "趣味口音" },
+  { value: "zh_male_lubanqihao_mars_bigtts", name: "鲁班七号", scene: "趣味口音" },
+  { value: "zh_female_yangmi_mars_bigtts", name: "林潇", scene: "趣味口音" },
+  { value: "zh_female_linzhiling_mars_bigtts", name: "玲玲姐姐", scene: "趣味口音" },
+  { value: "zh_female_jiyejizi2_mars_bigtts", name: "春日部姐姐", scene: "趣味口音" },
+  { value: "zh_male_tangseng_mars_bigtts", name: "唐僧", scene: "趣味口音" },
+  { value: "zh_male_zhuangzhou_mars_bigtts", name: "庄周", scene: "趣味口音" },
+  { value: "zh_male_zhubajie_mars_bigtts", name: "猪八戒", scene: "趣味口音" },
+  { value: "zh_female_ganmaodianyin_mars_bigtts", name: "感冒电音姐姐", scene: "趣味口音" },
+  { value: "zh_female_naying_mars_bigtts", name: "直率英子", scene: "趣味口音" },
+  { value: "zh_female_leidian_mars_bigtts", name: "女雷神", scene: "趣味口音" },
+  { value: "zh_female_yueyunv_mars_bigtts", name: "粤语小溏", scene: "趣味口音" },
+  // ===== 多情感 =====
+  { value: "zh_male_beijingxiaoye_emo_v2_mars_bigtts", name: "北京小爷（多情感）", scene: "多情感" },
+  { value: "zh_female_roumeinvyou_emo_v2_mars_bigtts", name: "柔美女友（多情感）", scene: "多情感" },
+  { value: "zh_male_yangguangqingnian_emo_v2_mars_bigtts", name: "阳光青年（多情感）", scene: "多情感" },
+  { value: "zh_female_meilinvyou_emo_v2_mars_bigtts", name: "魅力女友（多情感）", scene: "多情感" },
+  { value: "zh_female_shuangkuaisisi_emo_v2_mars_bigtts", name: "爽快思思（多情感）", scene: "多情感" },
+  { value: "zh_male_junlangnanyou_emo_v2_mars_bigtts", name: "俊朗男友（多情感）", scene: "多情感" },
+  { value: "zh_male_yourougongzi_emo_v2_mars_bigtts", name: "优柔公子（多情感）", scene: "多情感" },
+  { value: "zh_female_linjuayi_emo_v2_mars_bigtts", name: "邻居阿姨（多情感）", scene: "多情感" },
+  { value: "zh_male_jingqiangkanye_emo_mars_bigtts", name: "京腔侃爷（多情感）", scene: "多情感" },
+  { value: "zh_male_guangzhoudege_emo_mars_bigtts", name: "广州德哥（多情感）", scene: "多情感" },
+  { value: "zh_male_aojiaobazong_emo_v2_mars_bigtts", name: "傲娇霸总（多情感）", scene: "多情感" },
+  { value: "zh_female_tianxinxiaomei_emo_v2_mars_bigtts", name: "甜心小美（多情感）", scene: "多情感" },
+  { value: "zh_female_gaolengyujie_emo_v2_mars_bigtts", name: "高冷御姐（多情感）", scene: "多情感" },
+  { value: "zh_male_lengkugege_emo_v2_mars_bigtts", name: "冷酷哥哥（多情感）", scene: "多情感" },
+  { value: "zh_male_shenyeboke_emo_v2_mars_bigtts", name: "深夜播客（多情感）", scene: "多情感" },
+  // ===== 多语种 =====
+  { value: "multi_female_shuangkuaisisi_moon_bigtts", name: "はるこ/Esmeralda", scene: "多语种" },
+  { value: "multi_male_jingqiangkanye_moon_bigtts", name: "かずね/Javier", scene: "多语种" },
+  { value: "multi_female_gaolengyujie_moon_bigtts", name: "あけみ", scene: "多语种" },
+  { value: "multi_male_wanqudashu_moon_bigtts", name: "ひろし/Roberto", scene: "多语种" },
+  { value: "en_male_adam_mars_bigtts", name: "Adam", scene: "多语种" },
+  { value: "en_female_sarah_mars_bigtts", name: "Sarah", scene: "多语种" },
+  { value: "en_male_dryw_mars_bigtts", name: "Dryw", scene: "多语种" },
+  { value: "en_male_smith_mars_bigtts", name: "Smith", scene: "多语种" },
+  { value: "en_male_jackson_mars_bigtts", name: "Jackson", scene: "多语种" },
+  { value: "en_female_amanda_mars_bigtts", name: "Amanda", scene: "多语种" },
+  { value: "en_female_emily_mars_bigtts", name: "Emily", scene: "多语种" },
+  { value: "multi_male_xudong_conversation_wvae_bigtts", name: "まさお/Daníel", scene: "多语种" },
+  { value: "multi_female_sophie_conversation_wvae_bigtts", name: "さとみ/Sofía", scene: "多语种" },
+  { value: "zh_male_M100_conversation_wvae_bigtts", name: "悠悠君子/Lucas", scene: "多语种" },
+  { value: "zh_male_xudong_conversation_wvae_bigtts", name: "快乐小东/Daniel", scene: "多语种" },
+  { value: "zh_female_sophie_conversation_wvae_bigtts", name: "魅力苏菲/Sophie", scene: "多语种" },
+  { value: "multi_zh_male_youyoujunzi_moon_bigtts", name: "ひかる（光）", scene: "多语种" },
+  { value: "en_male_charlie_conversation_wvae_bigtts", name: "Owen", scene: "多语种" },
+  { value: "en_female_sarah_new_conversation_wvae_bigtts", name: "Luna", scene: "多语种" },
+  { value: "en_female_dacey_conversation_wvae_bigtts", name: "Daisy", scene: "多语种" },
+  { value: "multi_female_maomao_conversation_wvae_bigtts", name: "つき/Diana", scene: "多语种" },
+  { value: "multi_male_M100_conversation_wvae_bigtts", name: "Lucía", scene: "多语种" },
+  { value: "en_male_campaign_jamal_moon_bigtts", name: "Energetic Male II", scene: "多语种" },
+  { value: "en_male_chris_moon_bigtts", name: "Gotham Hero", scene: "多语种" },
+  { value: "en_female_daisy_moon_bigtts", name: "Delicate Girl", scene: "多语种" },
+  { value: "en_female_product_darcie_moon_bigtts", name: "Flirty Female", scene: "多语种" },
+  { value: "en_female_emotional_moon_bigtts", name: "Peaceful Female", scene: "多语种" },
+  { value: "en_male_bruce_moon_bigtts", name: "Bruce", scene: "多语种" },
+  { value: "en_male_dave_moon_bigtts", name: "Dave", scene: "多语种" },
+  { value: "en_male_hades_moon_bigtts", name: "Hades", scene: "多语种" },
+  { value: "en_male_michael_moon_bigtts", name: "Michael", scene: "多语种" },
+  { value: "en_female_onez_moon_bigtts", name: "Onez", scene: "多语种" },
+  { value: "en_female_nara_moon_bigtts", name: "Nara", scene: "多语种" },
+  { value: "en_female_lauren_moon_bigtts", name: "Lauren", scene: "多语种" },
+  { value: "en_female_candice_emo_v2_mars_bigtts", name: "Candice", scene: "多语种" },
+  { value: "en_male_corey_emo_v2_mars_bigtts", name: "Corey", scene: "多语种" },
+  { value: "en_male_glen_emo_v2_mars_bigtts", name: "Glen", scene: "多语种" },
+  { value: "en_female_nadia_tips_emo_v2_mars_bigtts", name: "Nadia1", scene: "多语种" },
+  { value: "en_female_nadia_poetry_emo_v2_mars_bigtts", name: "Nadia2", scene: "多语种" },
+  { value: "en_male_sylus_emo_v2_mars_bigtts", name: "Sylus", scene: "多语种" },
+  { value: "en_female_skye_emo_v2_mars_bigtts", name: "Serena", scene: "多语种" }
+];
+
+// 当前引擎：siliconflow | volcano | minimax
+function getEngine() {
+  const e = extension_settings[extensionName]?.engine;
+  return e === "volcano" || e === "minimax" ? e : "siliconflow";
+}
+
+// 火山当前音色：自定义（ICL 复刻）优先
+function getVolcSpeaker() {
+  const s = extension_settings[extensionName] || {};
+  const custom = String(s.volcCustomSpeaker || "").trim();
+  return custom || s.volcSpeaker || defaultSettings.volcSpeaker;
+}
+
+// 按音色名推断火山 Resource-Id（对应不同大模型版本）
+function inferVolcResourceId(speaker) {
+  const v = String(speaker || "").trim();
+  const lower = v.toLowerCase();
+  if (lower.startsWith("icl_") || lower.startsWith("s_")) return "seed-icl-2.0";
+  if (v.includes("_uranus_") || v.includes("_saturn_") || v.includes("_moon_")) return "seed-tts-2.0";
+  return "seed-tts-1.0";
+}
+
+// 语速 0.5~2.0 → 火山 speech_rate（-50~100）
+function volcSpeedToSpeechRate(speed) {
+  let s = Number(speed);
+  if (!Number.isFinite(s)) s = 1.0;
+  s = Math.min(2.0, Math.max(0.5, s));
+  return Math.round((s - 1) * 100);
+}
+
+// 火山引擎 V3 单向流式合成（经酒馆 /proxy 中转解决跨域），返回 mp3 Blob
+async function synthesizeVolcano(text, speaker, speed) {
+  const s = extension_settings[extensionName] || {};
+  const appId = String(s.volcAppId || "").trim();
+  const accessKey = String(s.volcAccessKey || "").trim();
+  if (!appId || !accessKey) {
+    throw new Error("请先在 API 页填写火山引擎的 AppID 和 Access Key");
+  }
+  if (!text || !speaker) {
+    throw new Error("缺少必要参数: text/speaker");
+  }
+
+  const resourceId = inferVolcResourceId(speaker);
+  const body = {
+    user: { uid: "st_user" },
+    req_params: {
+      text,
+      speaker,
+      audio_params: {
+        format: "mp3",
+        sample_rate: 24000,
+        speech_rate: volcSpeedToSpeechRate(speed),
+        loudness_rate: 0,
+      },
+    },
+  };
+  if (resourceId === "seed-tts-1.0") body.req_params.model = "seed-tts-1.1";
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 45000);
+
+  let resp;
+  try {
+    resp = await fetch("/proxy/" + encodeURIComponent(VOLC_V3_URL), {
+      method: "POST",
+      headers: {
+        ...(typeof getRequestHeaders === "function" ? getRequestHeaders() : {}),
+        "Content-Type": "application/json",
+        "X-Api-App-Id": appId,
+        "X-Api-Access-Key": accessKey,
+        "X-Api-Resource-Id": resourceId,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === "AbortError") {
+      throw new Error("请求超时（45秒）。可能文本太长或网络问题，换短一点的内容试试。");
+    }
+    throw new Error("火山引擎请求失败：" + (e && e.message ? e.message : e) + "（需要酒馆服务端支持 /proxy 中转）");
+  }
+
+  const logid = resp.headers.get("X-Tt-Logid") || "";
+  if (!resp.ok) {
+    clearTimeout(timeoutId);
+    const errText = await resp.text().catch(() => "");
+    throw new Error(`火山引擎 HTTP ${resp.status}: ${String(errText).slice(0, 200)}${logid ? ` (logid: ${logid})` : ""}`);
+  }
+
+  // V3 单向流式：逐行 JSON，data 字段是 base64 音频分片
+  const audioChunks = [];
+  try {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t) continue;
+        let json;
+        try { json = JSON.parse(t); } catch (e) { continue; }
+        if (json.data) {
+          const bin = atob(json.data);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          audioChunks.push(bytes);
+        } else if (json.code && json.code !== 20000000) {
+          throw new Error(`火山引擎错误 ${json.code}: ${json.message || "合成失败"}`);
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name === "AbortError") {
+      throw new Error("请求超时（45秒）。可能文本太长或网络问题，换短一点的内容试试。");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (audioChunks.length === 0) {
+    throw new Error(`火山引擎未返回音频数据${logid ? ` (logid: ${logid})` : ""}`);
+  }
+  return new Blob(audioChunks, { type: "audio/mpeg" });
+}
+
+// ============ MiniMax ============
+// MiniMax 系统音色（T2A v2）
+const MINIMAX_VOICES = [
+  // ===== 中文·男声 =====
+  { value: "male-qn-qingse", name: "青涩青年", scene: "中文·男声" },
+  { value: "male-qn-jingying", name: "精英青年", scene: "中文·男声" },
+  { value: "male-qn-badao", name: "霸道青年", scene: "中文·男声" },
+  { value: "male-qn-daxuesheng", name: "青年大学生", scene: "中文·男声" },
+  { value: "presenter_male", name: "男性主持人", scene: "中文·男声" },
+  { value: "audiobook_male_1", name: "男性有声书1", scene: "中文·男声" },
+  { value: "audiobook_male_2", name: "男性有声书2", scene: "中文·男声" },
+  // ===== 中文·女声 =====
+  { value: "female-shaonv", name: "少女", scene: "中文·女声" },
+  { value: "female-yujie", name: "御姐", scene: "中文·女声" },
+  { value: "female-chengshu", name: "成熟女性", scene: "中文·女声" },
+  { value: "female-tianmei", name: "甜美女性", scene: "中文·女声" },
+  { value: "presenter_female", name: "女性主持人", scene: "中文·女声" },
+  { value: "audiobook_female_1", name: "女性有声书1", scene: "中文·女声" },
+  { value: "audiobook_female_2", name: "女性有声书2", scene: "中文·女声" },
+  // ===== 新版音色 =====
+  { value: "Chinese (Mandarin)_Unrestrained_Young_Man", name: "不羁青年（普通话）", scene: "新版音色" },
+  { value: "Calm_Woman", name: "沉稳女性", scene: "新版音色" },
+  { value: "Energetic_Man", name: "活力男性", scene: "新版音色" },
+  { value: "Gentle_Man", name: "温和男性", scene: "新版音色" },
+  { value: "Cute_Girl", name: "可爱女孩", scene: "新版音色" },
+  { value: "Deep_Voice_Man", name: "低沉男性", scene: "新版音色" },
+  { value: "English_Graceful_Lady", name: "优雅女士（英语）", scene: "新版音色" },
+  { value: "English_Persuasive_Man", name: "说服男声（英语）", scene: "新版音色" }
+];
+
+// MiniMax 当前音色：自定义（复刻）优先
+function getMinimaxVoice() {
+  const s = extension_settings[extensionName] || {};
+  const custom = String(s.minimaxCustomVoice || "").trim();
+  return custom || s.minimaxVoice || defaultSettings.minimaxVoice;
+}
+
+// MiniMax T2A v2 合成（经酒馆 /proxy 中转解决跨域），返回 mp3 Blob
+async function synthesizeMinimax(text, voiceId, speed) {
+  const s = extension_settings[extensionName] || {};
+  const apiKey = String(s.minimaxApiKey || "").trim();
+  const groupId = String(s.minimaxGroupId || "").trim();
+  if (!apiKey || !groupId) {
+    throw new Error("请先在 API 页填写 MiniMax 的 API Key 和 GroupID");
+  }
+  if (!text || !voiceId) {
+    throw new Error("缺少必要参数: text/voice_id");
+  }
+
+  let spd = Number(speed);
+  if (!Number.isFinite(spd)) spd = 1.0;
+  spd = Math.min(2.0, Math.max(0.5, spd));
+
+  const host = String(s.minimaxApiHost || "https://api.minimaxi.com").replace(/\/+$/, "");
+  const url = `${host}/v1/t2a_v2?GroupId=${encodeURIComponent(groupId)}`;
+  const body = {
+    model: s.minimaxModel || "speech-02-hd",
+    text,
+    stream: false,
+    voice_setting: { voice_id: voiceId, speed: spd, vol: 1, pitch: 0 },
+    audio_setting: { sample_rate: 32000, bitrate: 128000, format: "mp3", channel: 1 },
+    subtitle_enable: false,
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 45000);
+
+  let resp;
+  try {
+    resp = await fetch("/proxy/" + encodeURIComponent(url), {
+      method: "POST",
+      headers: {
+        ...(typeof getRequestHeaders === "function" ? getRequestHeaders() : {}),
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === "AbortError") {
+      throw new Error("请求超时（45秒）。可能文本太长或网络问题，换短一点的内容试试。");
+    }
+    throw new Error("MiniMax 请求失败：" + (e && e.message ? e.message : e) + "（需要酒馆服务端支持 /proxy 中转）");
+  }
+  clearTimeout(timeoutId);
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    throw new Error(`MiniMax HTTP ${resp.status}: ${String(errText).slice(0, 200)}`);
+  }
+
+  const data = await resp.json().catch(() => null);
+  if (!data) throw new Error("MiniMax 返回的不是有效 JSON");
+  if (data.base_resp && data.base_resp.status_code !== 0) {
+    throw new Error(`MiniMax 错误 ${data.base_resp.status_code}: ${data.base_resp.status_msg || "合成失败"}`);
+  }
+
+  const audioField = data?.data?.audio;
+  if (!audioField) throw new Error("MiniMax 未返回音频数据");
+
+  // 官方返回 hex 编码；个别网关返回 base64，两种都兼容
+  let bytes;
+  if (/^[0-9a-fA-F]+$/.test(audioField) && audioField.length % 2 === 0) {
+    bytes = new Uint8Array(audioField.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(audioField.substr(i * 2, 2), 16);
+  } else {
+    const bin = atob(audioField);
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: "audio/mpeg" });
+}
 
 function normalizeTagPairs(value) {
   if (!Array.isArray(value)) return [];
@@ -207,9 +705,43 @@ function updateExtraTextRulesUI(enabled = extension_settings[extensionName]?.ext
 }
 
 // 加载设置
+// 旧版扩展文件夹名（设置曾保存在这些 key 下），用于一次性迁移
+const legacySettingKeys = [
+  "硅基流动语音",
+  "硅基流动语音2",
+  "声林语音2",
+  "sillytavern-siliconflow-tts",
+  "st-siliconflow-tts",
+  "ST-sound-forest-TTS",
+  "st-sound-forest-tts",
+];
+
 async function loadSettings() {
   extension_settings[extensionName] = extension_settings[extensionName] || {};
-  
+
+  // 一次性迁移：把旧 key 下已有的字段拷到当前 key（只补缺，不覆盖）
+  let migrated = false;
+  for (const legacyKey of legacySettingKeys) {
+    if (legacyKey === extensionName) continue;
+    const legacy = extension_settings[legacyKey];
+    if (!legacy || typeof legacy !== "object") continue;
+    for (const [key, value] of Object.entries(legacy)) {
+      const current = extension_settings[extensionName][key];
+      const hasDefault = Object.prototype.hasOwnProperty.call(defaultSettings, key);
+      const isUntouchedDefault = hasDefault && JSON.stringify(current) === JSON.stringify(defaultSettings[key]);
+      const legacyIsCustom = !hasDefault || JSON.stringify(value) !== JSON.stringify(defaultSettings[key]);
+      // 当前缺失，或当前还是默认值（没动过）而旧值是自定义的，都搬过来
+      if (current === undefined || (isUntouchedDefault && legacyIsCustom)) {
+        extension_settings[extensionName][key] = value;
+        migrated = true;
+      }
+    }
+  }
+  if (migrated) {
+    saveSettingsDebounced();
+    console.log(`[${extensionName}] 已从旧版扩展迁移设置`);
+  }
+
   if (Object.keys(extension_settings[extensionName]).length === 0) {
     Object.assign(extension_settings[extensionName], defaultSettings);
   }
@@ -260,7 +792,36 @@ async function loadSettings() {
   renderTagPairSettings("read");
   updateExtraTextRulesUI();
   updateSymbolConflictUI();
-  
+
+  // 引擎与火山设置回显
+  $("#volc_app_id").val(extension_settings[extensionName].volcAppId || "");
+  $("#volc_access_key").val(extension_settings[extensionName].volcAccessKey || "");
+  $("#volc_speed").val(extension_settings[extensionName].volcSpeed || defaultSettings.volcSpeed);
+  $("#volc_speed_value").text(extension_settings[extensionName].volcSpeed || defaultSettings.volcSpeed);
+  // 旧版单个自定义音色ID → 自动收进「我的复刻音色」列表
+  const legacyVolcCustom = String(extension_settings[extensionName].volcCustomSpeaker || "").trim();
+  if (legacyVolcCustom) {
+    const list = Array.isArray(extension_settings[extensionName].volcClonedVoices)
+      ? extension_settings[extensionName].volcClonedVoices
+      : (extension_settings[extensionName].volcClonedVoices = []);
+    if (!list.some(v => v && v.id === legacyVolcCustom)) {
+      list.push({ id: legacyVolcCustom, name: legacyVolcCustom });
+      saveSettingsDebounced();
+    }
+  }
+  buildVolcSpeakerOptions();
+  renderVolcCloneList();
+  // MiniMax 设置回显
+  $("#minimax_api_key").val(extension_settings[extensionName].minimaxApiKey || "");
+  $("#minimax_group_id").val(extension_settings[extensionName].minimaxGroupId || "");
+  $("#minimax_api_host").val(extension_settings[extensionName].minimaxApiHost || defaultSettings.minimaxApiHost);
+  $("#minimax_model").val(extension_settings[extensionName].minimaxModel || defaultSettings.minimaxModel);
+  $("#minimax_custom_voice").val(extension_settings[extensionName].minimaxCustomVoice || "");
+  $("#minimax_speed").val(extension_settings[extensionName].minimaxSpeed || defaultSettings.minimaxSpeed);
+  $("#minimax_speed_value").text(extension_settings[extensionName].minimaxSpeed || defaultSettings.minimaxSpeed);
+  buildMinimaxVoiceOptions();
+  updateEngineUI();
+
   updateVoiceOptions();
 }
 
@@ -350,11 +911,56 @@ function collectCurrentChatSpeakers() {
   return names;
 }
 
+// 当前引擎下的默认音色
+function getDefaultVoice() {
+  const engine = getEngine();
+  if (engine === "volcano") return getVolcSpeaker();
+  if (engine === "minimax") return getMinimaxVoice();
+  return $("#tts_voice").val() || extension_settings[extensionName].ttsVoice || defaultSettings.ttsVoice;
+}
+
+// 当前引擎下的多人角色音色映射（硅基 / 火山 / MiniMax 分开存）
+function getRoleVoiceMap() {
+  const s = extension_settings[extensionName];
+  const engine = getEngine();
+  if (engine === "volcano") {
+    s.roleVoiceMapVolc = s.roleVoiceMapVolc || {};
+    return s.roleVoiceMapVolc;
+  }
+  if (engine === "minimax") {
+    s.roleVoiceMapMinimax = s.roleVoiceMapMinimax || {};
+    return s.roleVoiceMapMinimax;
+  }
+  s.roleVoiceMap = s.roleVoiceMap || {};
+  return s.roleVoiceMap;
+}
+
+// 当前引擎下可选的音色列表（角色音色映射用）
+function getEngineVoiceOptions() {
+  const engine = getEngine();
+  if (engine === "volcano") {
+    const options = VOLC_VOICES.map(v => ({ value: v.value, label: `${v.name}（${v.scene}）` }));
+    const custom = String(extension_settings[extensionName]?.volcCustomSpeaker || "").trim();
+    if (custom) options.unshift({ value: custom, label: `${custom}（自定义/复刻）` });
+    (extension_settings[extensionName]?.volcClonedVoices || []).forEach(v => {
+      if (v && v.id) options.unshift({ value: v.id, label: `${v.name || v.id}（我的复刻）` });
+    });
+    return options;
+  }
+  if (engine === "minimax") {
+    const options = MINIMAX_VOICES.map(v => ({ value: v.value, label: `${v.name}（${v.scene}）` }));
+    const custom = String(extension_settings[extensionName]?.minimaxCustomVoice || "").trim();
+    if (custom) options.unshift({ value: custom, label: `${custom}（自定义/复刻）` });
+    return options;
+  }
+  return getAllVoiceOptions();
+}
+
 function renderRoleVoiceMap(names = collectCurrentChatSpeakers()) {
   const container = $("#tts_role_voice_map");
   if (container.length === 0) return;
-  const roleVoiceMap = extension_settings[extensionName].roleVoiceMap || {};
-  const voiceOptions = getAllVoiceOptions();
+  const roleVoiceMap = getRoleVoiceMap();
+  const voiceOptions = getEngineVoiceOptions();
   if (!names.length) {
     container.html('<small>当前聊天还没有读到角色消息。打开角色聊天页后点“刷新当前聊天角色”。</small>');
     return;
@@ -379,10 +985,24 @@ function getMessageSpeakerName(messageElement) {
 }
 
 function getVoiceForSpeaker(speakerName) {
-  const fallback = $("#tts_voice").val() || extension_settings[extensionName].ttsVoice || defaultSettings.ttsVoice;
+  const fallback = getDefaultVoice();
   if (!speakerName || isTemplateSpeakerName(speakerName)) return fallback;
-  const mapped = extension_settings[extensionName].roleVoiceMap?.[speakerName];
+  const mapped = getRoleVoiceMap()[speakerName];
   return mapped || fallback;
+}
+
+// 保存三引擎 API 资料（按钮触发，带反馈）
+function saveApiSettings() {
+  const s = extension_settings[extensionName];
+  s.apiKey = String($("#siliconflow_api_key").val() || "").trim();
+  s.apiUrl = String($("#siliconflow_api_url").val() || "").trim() || defaultSettings.apiUrl;
+  s.volcAppId = String($("#volc_app_id").val() || "").trim();
+  s.volcAccessKey = String($("#volc_access_key").val() || "").trim();
+  s.minimaxApiKey = String($("#minimax_api_key").val() || "").trim();
+  s.minimaxGroupId = String($("#minimax_group_id").val() || "").trim();
+  saveSettingsDebounced();
+  toastr.success("API 设置已保存，刷新后自动恢复", "声林");
+  ttsLog("💾 API 设置已保存");
 }
 
 // 保存设置
@@ -410,6 +1030,20 @@ function saveSettings() {
   extension_settings[extensionName].generationFrequency = parseInt($("#generation_frequency").val());
   extension_settings[extensionName].autoPlay = $("#auto_play_audio").prop("checked");
   extension_settings[extensionName].autoPlayUser = $("#auto_play_user").prop("checked");
+  // 引擎与火山设置
+  extension_settings[extensionName].engine = $("#tts_engine").val() === "volcano" ? "volcano" : ($("#tts_engine").val() === "minimax" ? "minimax" : "siliconflow");
+  extension_settings[extensionName].volcAppId = String($("#volc_app_id").val() || "").trim();
+  extension_settings[extensionName].volcAccessKey = String($("#volc_access_key").val() || "").trim();
+  extension_settings[extensionName].volcSpeaker = $("#volc_speaker").val() || defaultSettings.volcSpeaker;
+  extension_settings[extensionName].volcSpeed = parseFloat($("#volc_speed").val()) || defaultSettings.volcSpeed;
+  // MiniMax 设置
+  extension_settings[extensionName].minimaxApiKey = String($("#minimax_api_key").val() || "").trim();
+  extension_settings[extensionName].minimaxGroupId = String($("#minimax_group_id").val() || "").trim();
+  extension_settings[extensionName].minimaxApiHost = $("#minimax_api_host").val() || defaultSettings.minimaxApiHost;
+  extension_settings[extensionName].minimaxModel = $("#minimax_model").val() || defaultSettings.minimaxModel;
+  extension_settings[extensionName].minimaxVoice = $("#minimax_voice").val() || defaultSettings.minimaxVoice;
+  extension_settings[extensionName].minimaxCustomVoice = String($("#minimax_custom_voice").val() || "").trim();
+  extension_settings[extensionName].minimaxSpeed = parseFloat($("#minimax_speed").val()) || defaultSettings.minimaxSpeed;
   
   saveSettingsDebounced();
   // 移除弹窗提示，改为控制台日志
@@ -450,21 +1084,39 @@ async function testConnection() {
 
 // TTS功能
 async function generateTTS(text, buttonElement = null, voiceOverride = null) {
-  const apiKey = extension_settings[extensionName].apiKey;
-  
-  if (!apiKey) {
-    ttsLog("❌ 没有配置 API 密钥");
+  const engine = getEngine();
+  const settings = extension_settings[extensionName];
+
+  if (engine === "siliconflow" && !settings.apiKey) {
+    ttsLog("❌ 没有配置硅基 API 密钥");
     toastr.error("请先配置API密钥", "TTS错误");
     return;
   }
-  
+  if (engine === "volcano") {
+    const hasVolcAuth = String(settings.volcAppId || "").trim() && String(settings.volcAccessKey || "").trim();
+    if (!hasVolcAuth) {
+      ttsLog("❌ 没有配置火山引擎 AppID / Access Key");
+      toastr.error("请先在 API 页配置火山引擎 AppID 和 Access Key", "TTS错误");
+      return;
+    }
+  }
+  if (engine === "minimax") {
+    const hasMmAuth = String(settings.minimaxApiKey || "").trim() && String(settings.minimaxGroupId || "").trim();
+    if (!hasMmAuth) {
+      ttsLog("❌ 没有配置 MiniMax API Key / GroupID");
+      toastr.error("请先在 API 页配置 MiniMax API Key 和 GroupID", "TTS错误");
+      return;
+    }
+  }
+
   if (!text) {
     ttsLog("❌ 文本为空，不请求");
     toastr.error("文本不能为空", "TTS错误");
     return;
   }
 
-  ttsLog("① 进入生成，文本长度 " + text.length + "：「" + text.substring(0, 30) + "」");
+  const engineLabel = { siliconflow: "硅基流动", volcano: "火山引擎", minimax: "MiniMax" }[engine] || engine;
+  ttsLog("① 进入生成（" + engineLabel + "），文本长度 " + text.length + "：「" + text.substring(0, 30) + "」");
 
   // 先熄灭其它按钮，再把当前按钮立刻点亮成“生成中（黄）”——任何一次点击都能马上看到反馈
   $(".tts-manual-play-btn").removeClass("tts-loading tts-playing");
@@ -473,18 +1125,23 @@ async function generateTTS(text, buttonElement = null, voiceOverride = null) {
     setButtonState(buttonElement, "loading");
   }
 
-  const voiceValue = voiceOverride || $("#tts_voice").val() || "alex";
-  const speed = parseFloat($("#tts_speed").val()) || 1.0;
-  const gain = parseFloat($("#tts_gain").val()) || 0;
-  const cacheKey = JSON.stringify({ text, voice: voiceValue, speed, gain });
+  const voiceValue = voiceOverride || getDefaultVoice();
+  const speed = engine === "volcano"
+    ? (parseFloat($("#volc_speed").val()) || settings.volcSpeed || 1.0)
+    : engine === "minimax"
+      ? (parseFloat($("#minimax_speed").val()) || settings.minimaxSpeed || 1.0)
+      : (parseFloat($("#tts_speed").val()) || 1.0);
+  const gain = engine === "siliconflow" ? (parseFloat($("#tts_gain").val()) || 0) : 0;
+  const cacheKey = JSON.stringify({ engine, text, voice: voiceValue, speed, gain });
 
   // 命中缓存：同一段文字 + 同一音色 + 同一语速音量，直接播放，不再请求 API（不扣费）
-  if (ttsAudioCache.has(cacheKey)) {
+  const cachedEntry = ttsAudioCache.get(cacheKey);
+  if (cachedEntry) {
     ttsLog("② 命中缓存，直接播放（不扣费）");
-    playAudioUrl(ttsAudioCache.get(cacheKey), buttonElement);
-    return ttsAudioCache.get(cacheKey);
+    playAudioUrl(cachedEntry.url, buttonElement);
+    return cachedEntry.url;
   }
-  
+
   try {
     console.log("正在生成语音...");
 
@@ -497,68 +1154,92 @@ async function generateTTS(text, buttonElement = null, voiceOverride = null) {
       toastr.info(`文本较长，已按全文发送上限 ${MAX_LEN} 字朗读`, "TTS");
     }
 
-    let voiceParam;
-    if (voiceValue.startsWith("speech:")) {
-      voiceParam = voiceValue;
+    let audioBlob;
+
+    if (engine === "volcano") {
+      // ---------- 火山引擎分支 ----------
+      ttsLog("③ 请求火山引擎 API 中… 音色=" + voiceValue);
+      audioBlob = await synthesizeVolcano(text, voiceValue, speed);
+      ttsLog("④ 火山引擎合成完成");
+    } else if (engine === "minimax") {
+      // ---------- MiniMax 分支 ----------
+      ttsLog("③ 请求 MiniMax API 中… 音色=" + voiceValue);
+      audioBlob = await synthesizeMinimax(text, voiceValue, speed);
+      ttsLog("④ MiniMax 合成完成");
     } else {
-      voiceParam = `FunAudioLLM/CosyVoice2-0.5B:${voiceValue}`;
-    }
-    
-    const requestBody = {
-      model: "FunAudioLLM/CosyVoice2-0.5B",
-      input: text,
-      voice: voiceParam,
-      response_format: "mp3",
-      speed: speed,
-      gain: gain
-    };
-    ttsLog("③ 请求 API 中… 音色=" + voiceParam);
-
-    // 45 秒超时，避免无限卡在“生成中”
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 45000);
-
-    let response;
-    try {
-      response = await fetch(`${extension_settings[extensionName].apiUrl}/audio/speech`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal
-      });
-    } catch (e) {
-      clearTimeout(timeoutId);
-      if (e.name === 'AbortError') {
-        throw new Error('请求超时（45秒）。可能文本太长或网络问题，换短一点的内容试试。');
+      // ---------- 硅基流动分支 ----------
+      let voiceParam;
+      if (voiceValue.startsWith("speech:")) {
+        voiceParam = voiceValue;
+      } else {
+        voiceParam = `FunAudioLLM/CosyVoice2-0.5B:${voiceValue}`;
       }
-      throw e;
-    }
-    clearTimeout(timeoutId);
 
-    ttsLog("④ API 返回 HTTP " + response.status);
+      const requestBody = {
+        model: "FunAudioLLM/CosyVoice2-0.5B",
+        input: text,
+        voice: voiceParam,
+        response_format: "mp3",
+        speed: speed,
+        gain: gain
+      };
+      ttsLog("③ 请求 API 中… 音色=" + voiceParam);
 
-    if (!response.ok) {
-      const errText = await response.text();
-      ttsLog("❌ API 报错：" + errText.substring(0, 120));
-      throw new Error(`HTTP ${response.status}: ${errText}`);
+      // 45 秒超时，避免无限卡在“生成中”
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 45000);
+
+      let response;
+      try {
+        response = await fetch(`${settings.apiUrl}/audio/speech`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${settings.apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal
+        });
+      } catch (e) {
+        clearTimeout(timeoutId);
+        if (e.name === 'AbortError') {
+          throw new Error('请求超时（45秒）。可能文本太长或网络问题，换短一点的内容试试。');
+        }
+        throw e;
+      }
+      clearTimeout(timeoutId);
+
+      ttsLog("④ API 返回 HTTP " + response.status);
+
+      if (!response.ok) {
+        const errText = await response.text();
+        ttsLog("❌ API 报错：" + errText.substring(0, 120));
+        throw new Error(`HTTP ${response.status}: ${errText}`);
+      }
+
+      audioBlob = await response.blob();
     }
-    
-    const audioBlob = await response.blob();
+
     const audioUrl = URL.createObjectURL(audioBlob);
     ttsLog("⑤ 拿到音频 " + (audioBlob.size / 1024).toFixed(1) + " KB");
 
-    // 存入缓存，下次同一段文字直接放，不再扣费
-    ttsAudioCache.set(cacheKey, audioUrl);
+    // 存入缓存（带引擎/文本/音色元数据，供「缓存」面板管理），下次同一段文字直接放，不再扣费
+    ttsAudioCache.set(cacheKey, {
+      url: audioUrl,
+      engine,
+      text: text.slice(0, 60),
+      voice: voiceValue,
+      size: audioBlob.size || 0,
+      time: Date.now()
+    });
+    renderCachePanel();
 
     playAudioUrl(audioUrl, buttonElement);
 
-    const fmt = extension_settings[extensionName].responseFormat || "mp3";
+    const fmt = engine === "siliconflow" ? (settings.responseFormat || "mp3") : "mp3";
     const downloadLink = $(`<a href="${audioUrl}" download="tts_output.${fmt}">下载音频</a>`);
     $("#tts_output").empty().append(downloadLink);
-    
+
     console.log("语音生成成功！");
     return audioUrl;
   } catch (error) {
@@ -567,6 +1248,119 @@ async function generateTTS(text, buttonElement = null, voiceOverride = null) {
     console.error("TTS Error:", error);
     toastr.error(`语音生成失败: ${error.message}`, "TTS错误");
   }
+}
+
+// ===== 缓存面板：硅基 / 火山 并列显示，可播放 / 下载 / 删除 =====
+// 缓存面板各引擎列的展开状态（默认收起）
+const cachePanelExpanded = { siliconflow: false, volcano: false, minimax: false };
+
+function formatCacheSize(bytes) {
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1) return mb.toFixed(1) + " MB";
+  return Math.max(1, Math.round(bytes / 1024)) + " KB";
+}
+
+function renderCachePanel() {
+  const lists = {
+    siliconflow: $("#sf_cache_list_siliconflow"),
+    volcano: $("#sf_cache_list_volcano"),
+    minimax: $("#sf_cache_list_minimax"),
+  };
+  if (!lists.siliconflow.length) return;
+
+  const buckets = { siliconflow: [], volcano: [], minimax: [] };
+  ttsAudioCache.forEach((entry, key) => {
+    if (!entry || typeof entry !== "object") return;
+    const engine = entry.engine === "volcano" || entry.engine === "minimax" ? entry.engine : "siliconflow";
+    buckets[engine].push({ key, entry });
+  });
+
+  Object.entries(lists).forEach(([engine, container]) => {
+    const items = buckets[engine].sort((a, b) => b.entry.time - a.entry.time);
+    // 公司名旁边的小字统计：条数 + 占用
+    const totalBytes = items.reduce((sum, it) => sum + (Number(it.entry.size) || 0), 0);
+    const statsEl = $("#sf_cache_stats_" + engine);
+    statsEl.text(items.length ? `${items.length} 条 · ${formatCacheSize(totalBytes)}` : "暂无缓存");
+    // 保持展开/收起状态
+    container.toggle(cachePanelExpanded[engine] === true);
+    $("#sf_cache_arrow_" + engine).text(cachePanelExpanded[engine] ? "▾" : "▸");
+    if (!items.length) {
+      container.html("<small>暂无缓存</small>");
+      return;
+    }
+    container.html(items.map(({ key, entry }) => {
+      const time = new Date(entry.time).toLocaleTimeString();
+      const fullText = String(entry.text || "");
+      const snippet = escapeHtml(fullText.slice(0, 18)) + (fullText.length > 18 ? "…" : "");
+      const sizeText = entry.size ? " · " + formatCacheSize(entry.size) : "";
+      return `<div class="sf-cache-row" data-key="${escapeHtml(key)}">
+        <div class="sf-cache-info" title="${escapeHtml(fullText)}">
+          <span class="sf-cache-text">${snippet}</span>
+          <small>${escapeHtml(entry.voice || "")} · ${time}${sizeText}</small>
+        </div>
+        <div class="sf-cache-actions">
+          <button type="button" class="menu_button sf-cache-play" title="播放（不扣费）">▶</button>
+          <button type="button" class="menu_button sf-cache-download" title="下载 mp3">⬇</button>
+          <button type="button" class="menu_button sf-cache-delete" title="删除">✕</button>
+        </div>
+      </div>`;
+    }).join(""));
+  });
+}
+
+// 构建火山音色下拉（按场景分组）
+function buildVolcSpeakerOptions() {
+  const select = $("#volc_speaker");
+  if (!select.length) return;
+  const current = extension_settings[extensionName]?.volcSpeaker || defaultSettings.volcSpeaker;
+  select.empty();
+  const groups = new Map();
+  VOLC_VOICES.forEach((v) => {
+    if (!groups.has(v.scene)) groups.set(v.scene, []);
+    groups.get(v.scene).push(v);
+  });
+  groups.forEach((voices, scene) => {
+    const og = $("<optgroup>").attr("label", scene);
+    voices.forEach((v) => og.append($("<option>").attr("value", v.value).text(v.name)));
+    select.append(og);
+  });
+  // 「我的复刻音色」追加到下拉里
+  const clones = extension_settings[extensionName]?.volcClonedVoices || [];
+  if (clones.length) {
+    const og = $("<optgroup>").attr("label", "我的复刻音色");
+    clones.forEach((v) => og.append($("<option>").attr("value", v.id).text((v.name || v.id) + "（复刻）")));
+    select.append(og);
+  }
+  select.val(current);
+}
+
+// 构建 MiniMax 音色下拉（按场景分组）
+function buildMinimaxVoiceOptions() {
+  const select = $("#minimax_voice");
+  if (!select.length) return;
+  const current = extension_settings[extensionName]?.minimaxVoice || defaultSettings.minimaxVoice;
+  select.empty();
+  const groups = new Map();
+  MINIMAX_VOICES.forEach((v) => {
+    if (!groups.has(v.scene)) groups.set(v.scene, []);
+    groups.get(v.scene).push(v);
+  });
+  groups.forEach((voices, scene) => {
+    const og = $("<optgroup>").attr("label", scene);
+    voices.forEach((v) => og.append($("<option>").attr("value", v.value).text(v.name)));
+    select.append(og);
+  });
+  select.val(current);
+}
+
+// 引擎切换时：显示对应配置组，刷新角色音色映射
+function updateEngineUI() {
+  const engine = getEngine();
+  $("#tts_engine").val(engine);
+  $("#sf_engine_silicon").toggle(engine === "siliconflow");
+  $("#sf_engine_volcano").toggle(engine === "volcano");
+  $("#sf_engine_minimax").toggle(engine === "minimax");
+  renderRoleVoiceMap();
 }
 
 // 实际播放一个音频URL（缓存和新生成共用）
@@ -2127,6 +2921,15 @@ async function uploadVoice() {
     toastr.error("参考音频文件是空的，请重新导入一段 mp3 或 wav。", "克隆音色错误");
     return;
   }
+
+  // 前置校验：只接受音频文件（iOS 上 file.type 可能为空，要用扩展名兜底）
+  const audioExts = ["mp3", "wav", "m4a", "aac", "ogg", "flac", "weba", "opus"];
+  const fileExt = String(audioFile.name || "").split(".").pop().toLowerCase();
+  const looksAudio = (audioFile.type && audioFile.type.startsWith("audio/")) || audioExts.includes(fileExt);
+  if (!looksAudio) {
+    toastr.error(`「${audioFile.name || "这个文件"}」不是音频文件。请导入 mp3 / wav / m4a 等音频，视频文件（如 mp4）硅基不收。`, "克隆音色错误");
+    return;
+  }
   
   try {
     console.log("开始上传音色...");
@@ -2313,6 +3116,14 @@ async function deleteCustomVoice(uri, name) {
 jQuery(async () => {
   const settingsHtml = await $.get(`${extensionFolderPath}/example.html`);
   $("#extensions_settings").append(settingsHtml);
+
+  // 使用说明里的图片：相对路径会指到酒馆首页，要补扩展目录前缀
+  $(".sf-guide img[data-guide]").each(function() {
+    $(this).attr("src", `${extensionFolderPath}/${$(this).attr("data-guide")}`);
+  });
+
+  // 版本号动态注入（以 index.js 的 extensionVersion 为准，HTML 不再写死）
+  $("#sf_version_text").text(extensionVersion);
   
   // Inline drawer 折叠/展开功能 - 使用延迟绑定
   setTimeout(() => {
@@ -2440,22 +3251,45 @@ jQuery(async () => {
     saveSettingsDebounced();
   });
   $("#test_siliconflow_connection").on("click", testConnection);
-  $("#tts_model").on("change", updateVoiceOptions);
+
+  // ===== 硅基设置自动保存（与火山/MiniMax 一致，输入即存） =====
+  $("#siliconflow_api_key, #siliconflow_api_url").on("input", function() {
+    extension_settings[extensionName].apiKey = String($("#siliconflow_api_key").val() || "").trim();
+    extension_settings[extensionName].apiUrl = String($("#siliconflow_api_url").val() || "").trim();
+    saveSettingsDebounced();
+  });
+  $("#tts_model").on("change", function() {
+    extension_settings[extensionName].ttsModel = $(this).val();
+    saveSettingsDebounced();
+    updateVoiceOptions();
+  });
   $("#tts_voice").on("change", function() {
     extension_settings[extensionName].ttsVoice = $(this).val();
+    saveSettingsDebounced();
     console.log("选择的音色:", $(this).val());
     renderRoleVoiceMap();
+  });
+  $("#response_format, #sample_rate, #image_size").on("change", function() {
+    extension_settings[extensionName].responseFormat = $("#response_format").val();
+    extension_settings[extensionName].sampleRate = parseInt($("#sample_rate").val(), 10);
+    extension_settings[extensionName].imageSize = $("#image_size").val();
+    saveSettingsDebounced();
+  });
+
+  // ===== 保存API设置按钮（三引擎通用） =====
+  $(document).on("click", ".sf-save-api-settings", function() {
+    saveApiSettings();
   });
   $("#refresh_role_voices").on("click", function() {
     renderRoleVoiceMap();
     toastr.success("已刷新当前聊天角色", "多人音色");
   });
   $(document).on("change", ".tts-role-voice-select", function() {
-    const roleName = $(this).closest(".sf-role-voice-row").data("role-name");
+    const roleName = $(this).closest(".sf-role-voice-row").attr("data-role-name");
     const voice = $(this).val();
-    extension_settings[extensionName].roleVoiceMap = extension_settings[extensionName].roleVoiceMap || {};
-    if (voice) extension_settings[extensionName].roleVoiceMap[roleName] = voice;
-    else delete extension_settings[extensionName].roleVoiceMap[roleName];
+    const map = getRoleVoiceMap();
+    if (voice) map[roleName] = voice;
+    else delete map[roleName];
     saveSettingsDebounced();
   });
   $("#tts_speed").on("input", function() {
@@ -2468,12 +3302,223 @@ jQuery(async () => {
   // TTS测试按钮
   $("#test_tts").on("click", async function() {
     primeAudioOnce(); // 用户手势内解锁音频
-    // 先保存当前选择的音色
-    extension_settings[extensionName].ttsVoice = $("#tts_voice").val();
+    // 先保存当前引擎选择的音色
+    if (getEngine() === "volcano") {
+      extension_settings[extensionName].volcSpeaker = $("#volc_speaker").val();
+    } else if (getEngine() === "minimax") {
+      extension_settings[extensionName].minimaxVoice = $("#minimax_voice").val();
+    } else {
+      extension_settings[extensionName].ttsVoice = $("#tts_voice").val();
+    }
     const testText = $("#tts_test_text").val() || "你好，这是一个测试语音。";
     await generateTTS(testText);
   });
   
+  // ===== 侧栏四块切换 =====
+  $(".sf-nav-item").on("click", function() {
+    const pane = $(this).attr("data-pane");
+    $(".sf-nav-item").removeClass("sf-nav-active");
+    $(this).addClass("sf-nav-active");
+    $(".sf-pane").hide();
+    $("#sf_pane_" + pane).show();
+    if (pane === "cache") renderCachePanel();
+  });
+
+  // ===== 引擎切换 =====
+  $("#tts_engine").on("change", function() {
+    const v = $(this).val();
+    extension_settings[extensionName].engine = v === "volcano" ? "volcano" : (v === "minimax" ? "minimax" : "siliconflow");
+    updateEngineUI();
+    saveSettingsDebounced();
+    ttsLog("🔀 已切换到「" + ({ siliconflow: "硅基流动", volcano: "火山引擎", minimax: "MiniMax" }[getEngine()]) + "」");
+  });
+
+  // ===== 火山设置自动保存 =====
+  $("#volc_app_id, #volc_access_key").on("input", function() {
+    extension_settings[extensionName].volcAppId = String($("#volc_app_id").val() || "").trim();
+    extension_settings[extensionName].volcAccessKey = String($("#volc_access_key").val() || "").trim();
+    saveSettingsDebounced();
+  });
+
+  // ===== 我的复刻音色（火山） =====
+  $("#volc_clone_add").on("click", function() {
+    const id = String($("#volc_clone_id").val() || "").trim();
+    const name = String($("#volc_clone_name").val() || "").trim() || id;
+    if (!id) {
+      toastr.error("请填写音色ID（S_xxx）", "复刻音色");
+      return;
+    }
+    const s = extension_settings[extensionName];
+    s.volcClonedVoices = Array.isArray(s.volcClonedVoices) ? s.volcClonedVoices : [];
+    if (s.volcClonedVoices.some(v => v && v.id === id)) {
+      toastr.warning("这个音色ID已经在列表里了", "复刻音色");
+      return;
+    }
+    s.volcClonedVoices.push({ id, name });
+    $("#volc_clone_id").val("");
+    $("#volc_clone_name").val("");
+    saveSettingsDebounced();
+    renderVolcCloneList();
+    buildVolcSpeakerOptions();
+    renderRoleVoiceMap();
+    ttsLog("🎤 已添加复刻音色：" + name + "（" + id + "）");
+  });
+  $(document).on("click", ".sf-clone-del", function() {
+    const idx = Number($(this).attr("data-idx"));
+    const list = extension_settings[extensionName]?.volcClonedVoices || [];
+    if (idx >= 0 && idx < list.length) {
+      const removed = list.splice(idx, 1)[0];
+      saveSettingsDebounced();
+      renderVolcCloneList();
+      buildVolcSpeakerOptions();
+      renderRoleVoiceMap();
+      ttsLog("🗑 已移除复刻音色：" + (removed?.name || removed?.id || ""));
+    }
+  });
+  $(document).on("click", ".sf-clone-verify", async function() {
+    const idx = Number($(this).attr("data-idx"));
+    const v = (extension_settings[extensionName]?.volcClonedVoices || [])[idx];
+    if (!v) return;
+    const statusEl = $("#sf_clone_status_" + idx);
+    statusEl.text("查询中…").css("color", "#ffd54a");
+    try {
+      const r = await verifyVolcCloneVoice(v.id);
+      statusEl.text(r.text).css("color", r.ok ? "#7bd88f" : "#ff8a80");
+      ttsLog("🔍 复刻音色 " + v.id + " 状态：" + r.text);
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      statusEl.text("❌ " + msg.slice(0, 24)).css("color", "#ff8a80").attr("title", msg);
+      toastr.error(msg, "复刻音色验证");
+      ttsLog("❌ 复刻音色验证失败：" + msg);
+    }
+  });
+  $("#volc_speaker").on("change", function() {
+    extension_settings[extensionName].volcSpeaker = $(this).val();
+    saveSettingsDebounced();
+    renderRoleVoiceMap();
+  });
+  $("#volc_speed").on("input", function() {
+    $("#volc_speed_value").text($(this).val());
+    extension_settings[extensionName].volcSpeed = parseFloat($(this).val()) || 1.0;
+    saveSettingsDebounced();
+  });
+
+  // 火山测试连接：合成一句短文本并播放
+  $("#test_volcano_connection").on("click", async function() {
+    primeAudioOnce();
+    const status = $("#volc_connection_status");
+    status.text("测试中…").css("color", "#ffd54a");
+    try {
+      const blob = await synthesizeVolcano("你好，火山引擎连接成功。", getVolcSpeaker(), parseFloat($("#volc_speed").val()) || 1.0);
+      playAudioUrl(URL.createObjectURL(blob));
+      status.text("已连接").css("color", "green");
+      ttsLog("✅ 火山引擎连接成功");
+    } catch (e) {
+      status.text("未连接").css("color", "red");
+      ttsLog("❌ 火山引擎连接失败：" + (e && e.message ? e.message : e));
+      toastr.error(e && e.message ? e.message : String(e), "火山引擎连接失败");
+    }
+  });
+
+  // ===== MiniMax 设置自动保存 =====
+  $("#minimax_api_key, #minimax_group_id, #minimax_custom_voice").on("input", function() {
+    extension_settings[extensionName].minimaxApiKey = String($("#minimax_api_key").val() || "").trim();
+    extension_settings[extensionName].minimaxGroupId = String($("#minimax_group_id").val() || "").trim();
+    extension_settings[extensionName].minimaxCustomVoice = String($("#minimax_custom_voice").val() || "").trim();
+    saveSettingsDebounced();
+  });
+  $("#minimax_api_host").on("change", function() {
+    extension_settings[extensionName].minimaxApiHost = $(this).val();
+    saveSettingsDebounced();
+  });
+  $("#minimax_model").on("change", function() {
+    extension_settings[extensionName].minimaxModel = $(this).val();
+    saveSettingsDebounced();
+  });
+  $("#minimax_voice").on("change", function() {
+    extension_settings[extensionName].minimaxVoice = $(this).val();
+    saveSettingsDebounced();
+    renderRoleVoiceMap();
+  });
+  $("#minimax_speed").on("input", function() {
+    $("#minimax_speed_value").text($(this).val());
+    extension_settings[extensionName].minimaxSpeed = parseFloat($(this).val()) || 1.0;
+    saveSettingsDebounced();
+  });
+
+  // MiniMax 测试连接：合成一句短文本并播放
+  $("#test_minimax_connection").on("click", async function() {
+    primeAudioOnce();
+    const status = $("#minimax_connection_status");
+    status.text("测试中…").css("color", "#ffd54a");
+    try {
+      const blob = await synthesizeMinimax("你好，MiniMax 连接成功。", getMinimaxVoice(), parseFloat($("#minimax_speed").val()) || 1.0);
+      playAudioUrl(URL.createObjectURL(blob));
+      status.text("已连接").css("color", "green");
+      ttsLog("✅ MiniMax 连接成功");
+    } catch (e) {
+      status.text("未连接").css("color", "red");
+      ttsLog("❌ MiniMax 连接失败：" + (e && e.message ? e.message : e));
+      toastr.error(e && e.message ? e.message : String(e), "MiniMax 连接失败");
+    }
+  });
+
+  // ===== 缓存面板操作（事件委托） =====
+  $(document).on("click", ".sf-cache-play", function() {
+    const entry = ttsAudioCache.get($(this).closest(".sf-cache-row").attr("data-key"));
+    if (entry) {
+      primeAudioOnce();
+      playAudioUrl(entry.url);
+    }
+  });
+  $(document).on("click", ".sf-cache-download", function() {
+    const entry = ttsAudioCache.get($(this).closest(".sf-cache-row").attr("data-key"));
+    if (!entry) return;
+    const a = document.createElement("a");
+    a.href = entry.url;
+    a.download = `tts_${entry.engine}_${new Date(entry.time).toISOString().replace(/[:.]/g, "-")}.mp3`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+  $(document).on("click", ".sf-cache-delete", function() {
+    const key = $(this).closest(".sf-cache-row").attr("data-key");
+    const entry = ttsAudioCache.get(key);
+    if (entry) {
+      try { URL.revokeObjectURL(entry.url); } catch (e) {}
+      ttsAudioCache.delete(key);
+    }
+    renderCachePanel();
+  });
+  $(document).on("click", ".sf-cache-clear", function() {
+    const engine = $(this).attr("data-engine");
+    ttsAudioCache.forEach((entry, key) => {
+      const entryEngine = entry && (entry.engine === "volcano" || entry.engine === "minimax") ? entry.engine : "siliconflow";
+      if (entryEngine === engine) {
+        try { URL.revokeObjectURL(entry.url); } catch (e) {}
+        ttsAudioCache.delete(key);
+      }
+    });
+    renderCachePanel();
+    const label = { siliconflow: "硅基流动", volcano: "火山引擎", minimax: "MiniMax" }[engine] || engine;
+    toastr.success(`已清空${label}缓存`, "缓存");
+  });
+  // 缓存列头点击展开/收起（点到「清空」按钮时不触发）
+  $(document).on("click", ".sf-cache-toggle", function(e) {
+    if ($(e.target).closest(".sf-cache-clear").length) return;
+    const engine = $(this).attr("data-engine");
+    if (!engine || !(engine in cachePanelExpanded)) return;
+    cachePanelExpanded[engine] = !cachePanelExpanded[engine];
+    renderCachePanel();
+  });
+
+  // ===== 日志面板清空 =====
+  $("#sf_log_clear").on("click", function() {
+    $("#sf_settings_log_body").empty();
+    const b = document.getElementById("tts-log-body");
+    if (b) b.innerHTML = "";
+  });
+
   // 加载设置
   await loadSettings();
   
@@ -2516,9 +3561,9 @@ jQuery(async () => {
     }
   }, 2000);
 
-  ttsLog("🟢 插件已加载。点消息上的 ▶ 看每一步日志。");
+  ttsLog("🟢 声林TTS已加载。点消息上的 ▶ 看每一步日志。");
   
-  console.log("硅基流动插件已加载");
+  console.log("声林TTS语音插件已加载");
   console.log("自动朗读功能已启用，请在控制台查看调试信息");
   console.log('事件源:', eventSource);
   console.log('事件类型:', event_types);
